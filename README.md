@@ -11,6 +11,8 @@ streamlit run app.py
 
 Open the local URL shown by Streamlit. Select cases and choose **Run selected cases** in the sidebar. Use **Test cases** to edit fixture inputs and outputs. Use **Connections** to configure a future RAG endpoint and check Confluence access. Saved runs are in `artifacts/runs/`; live runs redact question and response content on disk by default.
 
+The **Test cases** tab can export and import a synthetic case pack so edits can be shared or restored. **Compare runs** shows case-level status and Recall@K changes, with warnings when dataset versions or K differ.
+
 ## Test
 
 ```bash

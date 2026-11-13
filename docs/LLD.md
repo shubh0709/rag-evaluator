@@ -9,6 +9,7 @@
 | `app.py` | Streamlit dashboard, session case editing, run controls, connection forms, trace inspection, run history. |
 | `rag_eval/core.py` | Test-case, response and retrieval models; Recall@K; run assembly and dataset hash. |
 | `rag_eval/fixtures.py` | Fictional six-page corpus, four cases, predefined responses. |
+| `rag_eval/datasets.py` | Validated import/export of portable synthetic case packs. |
 | `rag_eval/adapters.py` | Generic JSON HTTP bot adapter, connection checks, dotted response paths, live artifact redaction. |
 | `rag_eval/store.py` | Atomic JSON run writes and run listing. |
 | `tests/` | Metric formula, fixture consistency, adapter mapping, and redaction tests. |
@@ -67,9 +68,10 @@ sequenceDiagram
 ## Dashboard behavior
 
 - **Overview:** latest run, status counts, case table, expected versus actual values, metric breakdown, ranked context, complete JSON trace, download.
-- **Test cases:** edit case labels and offline responses or add a session-local synthetic case. IDs must exist in the synthetic corpus.
+- **Test cases:** edit case labels and offline responses or add a session-local synthetic case. IDs must exist in the synthetic corpus. Export/import a versioned case pack to share or restore edits.
 - **Connections:** configure bot POST URL, auth header/token, request field names, response dotted paths, timeout; configure and check a Confluence URL. Tokens remain in Streamlit session state and are never included in run configuration.
 - **Run history:** inspect and download saved JSON artifacts. Live artifacts redact question, expected answer, generated answer, retrieved title/text/URL, and raw response metadata by default.
+- **Compare runs:** align cases by ID and show status and Recall@K changes; warn when dataset versions or K differ.
 - **Methodology:** visible explanation of the three evidence layers and current limits.
 
 The dashboard does not yet have account-based access control. Use it locally with synthetic content; before shared deployment or real content, implement authentication, authorizations for trace viewing, retention, encryption, and an approved data-handling policy.
@@ -96,4 +98,4 @@ The calculation stored in the result is:
 
 ## Tests and error semantics
 
-`pytest` covers perfect, partial, zero, duplicate, empty, no-label, and invalid-K behavior; fixture references; run status accounting; nested JSON mapping; and live artifact redaction. The dashboard was smoke-tested locally by triggering all four fixture cases and inspecting a case trace. Connection checks issue a GET and establish reachability only; they do not prove the POST body or response mapping. A real integration test needs the actual bot API, approved test credentials, and expected retrieval IDs.
+`pytest` covers perfect, partial, zero, duplicate, empty, no-label, and invalid-K behavior; fixture references; run status accounting; nested JSON mapping; case-pack import/export; and live artifact redaction. The dashboard was smoke-tested locally by triggering all four fixture cases and inspecting a case trace. Connection checks issue a GET and establish reachability only; they do not prove the POST body or response mapping. A real integration test needs the actual bot API, approved test credentials, and expected retrieval IDs.

@@ -87,6 +87,17 @@ Draft an HLD that labels proposed decisions and alternatives. Obtain HLD approva
 
 **Final verification:** 13 pytest tests passed; Python compilation passed. One warning comes from the installed AnyIO pytest plugin's use of a name deprecated for pytest 10. The local Streamlit browser smoke test showed the run summary and complete case trace. The server was restarted bound to `127.0.0.1:8501` so the unprotected local dashboard is not exposed on the network.
 
+## 2026-11-13 — Dashboard usability follow-up
+
+**Reason:** The user asked for a dashboard that collaborators can use to inspect and control evaluations. Session-only edits were hard to share, and saved runs required raw JSON inspection to compare.
+
+| ID | Status | Decision | Why / trade-off |
+| --- | --- | --- | --- |
+| D-012 | Implemented | Add versioned synthetic case-pack import/export with reference validation. | Collaborators can reproduce edited cases without persisting credentials. Case packs are constrained to the current synthetic corpus; real datasets need a separate approved workflow. |
+| D-013 | Implemented | Add case-level run comparison with dataset and K mismatch warnings. | Makes regressions visible while signaling when scores are not directly comparable. This is a descriptive view, not a significance test. |
+
+**Verification:** 15 pytest tests passed and Python compilation passed. Browser smoke checks confirmed the case-pack panel, the empty comparison state, and a populated comparison after a second manual run.
+
 ## Entry template
 
 ```text

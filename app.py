@@ -8,6 +8,7 @@ import streamlit as st
 
 from rag_eval.adapters import check_connection, persisted_copy, run_live_case
 from rag_eval.core import RagResponse, RetrievedItem, TestCase, make_run
+from rag_eval.datasets import export_case_pack, import_case_pack
 from rag_eval.fixtures import CASES, DOCUMENTS, RESPONSES
 from rag_eval.store import RunStore
 
@@ -62,7 +63,7 @@ st.markdown('<div class="eyebrow">Evaluation workspace</div>', unsafe_allow_html
 st.title("See what your RAG system actually did")
 st.markdown('<p class="subtle">Run cases, inspect ranked evidence, and trace every score back to its inputs.</p>', unsafe_allow_html=True)
 
-tabs = st.tabs(["Overview", "Test cases", "Connections", "Run history", "Methodology"])
+tabs = st.tabs(["Overview", "Test cases", "Connections", "Run history", "Compare runs", "Methodology"])
 
 with tabs[2]:
     st.subheader("Connections")
@@ -215,6 +216,21 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Test cases and fixture responses")
     st.caption("Edit a case and its offline response, then run it from the sidebar. Changes live in this dashboard session and are versioned by dataset hash in each run.")
+    with st.expander("Share or restore a synthetic case pack"):
+        st.caption("Export cases and predefined responses as JSON. Import validates references against the six-page synthetic corpus. Connection tokens are never included.")
+        pack = export_case_pack(st.session_state.cases, st.session_state.responses)
+        st.download_button("Download case pack", json.dumps(pack, indent=2),
+                           file_name="synthetic-case-pack.json", mime="application/json")
+        uploaded = st.file_uploader("Import case pack JSON", type="json")
+        if st.button("Import case pack", disabled=uploaded is None):
+            try:
+                imported_cases, imported_responses = import_case_pack(json.load(uploaded), set(DOCUMENTS))
+                st.session_state.cases = imported_cases
+                st.session_state.responses = imported_responses
+                st.success(f"Imported {len(imported_cases)} cases. The sidebar selection has been refreshed.")
+                st.rerun()
+            except (ValueError, json.JSONDecodeError) as exc:
+                st.error(str(exc))
     case_id = st.selectbox("Choose a case to edit", [c.id for c in st.session_state.cases], key="edit_case")
     case = next(c for c in st.session_state.cases if c.id == case_id)
     response = st.session_state.responses.get(case_id, RagResponse("", ()))
@@ -300,6 +316,41 @@ with tabs[3]:
         st.download_button("Download saved run", json.dumps(saved, indent=2), file_name=f"{history_id}.json", mime="application/json")
 
 with tabs[4]:
+    st.subheader("Compare saved runs")
+    history = store.list()
+    if len(history) < 2:
+        st.info("Run the cases at least twice to compare a baseline and a candidate.")
+    else:
+        left, right = st.columns(2)
+        with left:
+            baseline_id = st.selectbox("Baseline run", [r["id"] for r in history], index=1)
+        with right:
+            candidate_id = st.selectbox("Candidate run", [r["id"] for r in history], index=0)
+        baseline = next(r for r in history if r["id"] == baseline_id)
+        candidate = next(r for r in history if r["id"] == candidate_id)
+        if baseline_id == candidate_id:
+            st.warning("Choose two different runs to see changes.")
+        if baseline["dataset_version"] != candidate["dataset_version"]:
+            st.warning("Dataset versions differ. Score changes may reflect edited cases or labels rather than bot behavior.")
+        if baseline["k"] != candidate["k"]:
+            st.warning("K differs between runs. Recall@K scores are not directly comparable.")
+        base_results = {r["case"]["id"]: r for r in baseline["results"]}
+        candidate_results = {r["case"]["id"]: r for r in candidate["results"]}
+        rows = []
+        for case_id in sorted(set(base_results) | set(candidate_results)):
+            before = base_results.get(case_id, {})
+            after = candidate_results.get(case_id, {})
+            before_score = (before.get("calculation") or {}).get("score")
+            after_score = (after.get("calculation") or {}).get("score")
+            rows.append({"Case": case_id, "Baseline status": before.get("status", "not run"),
+                         "Candidate status": after.get("status", "not run"),
+                         "Baseline recall": before_score, "Candidate recall": after_score,
+                         "Score change": round(after_score - before_score, 4)
+                         if before_score is not None and after_score is not None else None})
+        st.dataframe(rows, hide_index=True, width="stretch")
+        st.caption("A status change can also result from a threshold change. Inspect both run configurations and case traces before drawing conclusions.")
+
+with tabs[5]:
     st.subheader("What these results mean")
     st.markdown("""
 **1 · Evaluator correctness.** Unit tests prove that Recall@K uses the agreed formula for known IDs, including duplicates, empty retrieval, and unlabeled cases.
