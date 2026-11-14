@@ -1,4 +1,5 @@
 import pytest
+from typing import cast
 
 from rag_eval.datasets import export_case_pack, import_case_pack
 from rag_eval.fixtures import CASES, DOCUMENTS, RESPONSES
@@ -12,6 +13,6 @@ def test_case_pack_round_trip():
 
 def test_case_pack_rejects_unknown_reference():
     pack = export_case_pack(CASES, RESPONSES)
-    pack["cases"][0]["relevant_ids"] = ["MISSING"]
+    cast(list[dict[str, object]], pack["cases"])[0]["relevant_ids"] = ["MISSING"]
     with pytest.raises(ValueError, match="Unknown relevant ID"):
         import_case_pack(pack, set(DOCUMENTS))

@@ -12,7 +12,7 @@ from rag_eval.fixtures import CASES, DOCUMENTS, RESPONSES
     (["A", "A", "B"], ["A", "B"], 2, 0.5),
     (["A", "A", "B"], ["A", "B"], 3, 1.0),
 ])
-def test_recall_at_k(retrieved, relevant, k, expected):
+def test_recall_at_k(retrieved: list[str], relevant: list[str], k: int, expected: float) -> None:
     assert recall_at_k(retrieved, relevant, k)["score"] == expected
 
 
@@ -42,6 +42,8 @@ def test_run_records_calculation_and_errors():
     run = make_run([good, bad], {"A": response, "B": RuntimeError("Bot timeout")},
                    mode="offline", k=1, threshold=1.0, config={})
     assert run["summary"] == {"passed": 1, "failed": 0, "not_applicable": 0, "error": 1}
-    assert run["results"][0]["calculation"]["numerator"] == 1
+    calculation = run["results"][0]["calculation"]
+    assert calculation is not None
+    assert calculation["numerator"] == 1
     assert run["results"][1]["error"] == "Bot timeout"
     assert run["dataset_version"]
