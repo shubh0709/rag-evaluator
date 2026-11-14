@@ -6,18 +6,23 @@ A local dashboard for running and inspecting Confluence RAG evaluation cases. Th
 
 ```bash
 python3 -m pip install -r requirements.txt
-streamlit run app.py
+python3 -m live_debugger streamlit app.py
 ```
 
-Open the local URL shown by Streamlit. Select cases and choose **Run selected cases** in the sidebar. Use **Test cases** to edit fixture inputs and outputs. Use **Connections** to configure a future RAG endpoint and check Confluence access. Saved runs are in `artifacts/runs/`; live runs redact question and response content on disk by default.
+Open the local URL shown by Streamlit. The [live execution debugger](live_debugger/README.md) opens in a second browser tab; it shows executed lines, stack frames, local bindings, and a replayable timeline. Select cases and choose **Run selected cases** in the sidebar. Use **Test cases** to edit fixture inputs and outputs. Use **Connections** to configure a future RAG endpoint and check Confluence access. Saved runs are in `artifacts/runs/`; live runs redact question and response content on disk by default.
 
 The **Test cases** tab can export and import a synthetic case pack so edits can be shared or restored. **Compare runs** shows case-level status and Recall@K changes, with warnings when dataset versions or K differ.
+
+When Streamlit is bound to a loopback address (the included default is `127.0.0.1`), **Check understanding** loads `study_quiz/QUESTIONS.md` and `study_quiz/ANSWER_KEY.md` into a local MCQ test. Submit all answers to see your score, correct answers, and explanations, or retake it. The `study_quiz/` folder is Git-ignored and must exist locally for the quiz to load; the tab is hidden when the server binds to a non-loopback address.
 
 ## Test
 
 ```bash
 python3 -m pytest -q
+python3 -m pyright
 ```
+
+Pyright checks the app, evaluation modules, debugger, and tests in strict mode.
 
 ## Current limits
 

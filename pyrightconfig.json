@@ -1,0 +1,6 @@
+{
+  "include": ["app.py", "rag_eval", "live_debugger", "tests"],
+  "exclude": ["**/__pycache__", "**/.venv"],
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.13"
+}
