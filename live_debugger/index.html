@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Execution debugger</title>
+  <style>
+    :root { color-scheme: dark; --bg:#07110c; --panel:#0b1910; --line:#246c39; --green:#72f097; --muted:#9ab5a0; --gold:#ffdc75; --red:#ff7e88; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:14px; font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; color:var(--green); background:var(--bg); }
+    header { display:flex; align-items:center; justify-content:space-between; gap:15px; margin-bottom:9px; }
+    h1 { font-size:19px; margin:0; letter-spacing:.02em; }
+    h2 { font-size:13px; margin:0 0 10px; font-weight:700; color:var(--green); }
+    .sub { color:var(--muted); font-size:12px; }
+    .live { color:var(--gold); }
+    .workspace { display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:9px; margin-top:9px; align-items:start; }
+    .details { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:9px; margin-top:9px; align-items:start; }
+    .panel { min-width:0; border:1px solid var(--line); background:var(--panel); padding:10px; box-shadow:inset 0 0 0 1px #103b20; overflow:auto; resize:vertical; }
+    .workspace .panel { height:min(52vh,490px); min-height:180px; }
+    .details .panel { height:210px; min-height:115px; }
+    .panel[hidden] { display:none!important; }
+    .panel.expanded { position:fixed; inset:3vh 3vw; width:94vw; height:94vh!important; max-height:none; z-index:50; resize:none; box-shadow:0 0 0 100vmax #000b,0 0 30px #000; }
+    body.view-expanded { overflow:hidden; }
+    .panel-heading { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+    .panel-heading h2 { margin:0; }
+    .panel-heading button { padding:2px 6px; font-size:11px; }
+    .viewbar { display:flex; flex-wrap:wrap; align-items:center; gap:5px; padding:7px; border:1px solid var(--line); background:#091b10; }
+    .viewbar strong { color:var(--muted); margin-right:4px; }
+    .viewbar button { padding:3px 7px; font-size:11px; }
+    .viewbar button[aria-pressed="true"] { background:#174e29; color:#e5ffea; }
+    .viewbar button[aria-pressed="false"] { color:#769781; }
+    .file { color:var(--gold); margin-bottom:9px; word-break:break-all; }
+    pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .source-line { display:flex; min-height:20px; color:#b8e8c2; }
+    .source-line.active { background:#174e29; color:#f5fff5; }
+    .number { flex:0 0 40px; color:#6f9f78; text-align:right; padding-right:12px; user-select:none; }
+    .source-line code { white-space:pre-wrap; }
+    .frame { border:1px solid var(--line); padding:9px; margin:7px 0; background:#08130d; }
+    .frame:first-of-type { background:#10341d; }
+    .frame .sub { font-size:11px; }
+    .frame-title { color:var(--gold); margin-bottom:3px; overflow-wrap:anywhere; }
+    .locals { display:grid; grid-template-columns:max-content 1fr; gap:2px 12px; }
+    .locals span:nth-child(even) { color:#d2ecd7; overflow-wrap:anywhere; }
+    .exception { color:var(--red); margin:6px 0; }
+    .timeline { margin:0; padding:8px 10px; resize:none; }
+    .strip { display:flex; gap:2px; overflow-x:auto; padding:6px 0 9px; min-height:28px; }
+    .tick { flex:0 0 5px; height:20px; border:0; padding:0; background:#275b36; cursor:pointer; }
+    .tick.selected { background:var(--gold); height:26px; }
+    .tick.exception { background:var(--red); }
+    .tick.return { background:#45a7d7; }
+    .tick.call { background:#c38aef; }
+    .controls { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+    button { border:1px solid var(--line); background:#0b2515; color:var(--green); padding:5px 10px; cursor:pointer; font:inherit; }
+    button:hover { background:#174e29; }
+    button:disabled { opacity:.4; cursor:default; }
+    button.primary { color:#07110c; background:var(--green); }
+    .kv { display:grid; grid-template-columns:minmax(80px,max-content) 1fr; gap:3px 12px; margin:5px 0; }
+    .kv .value { color:#d2ecd7; overflow-wrap:anywhere; }
+    .kv .changed { color:var(--gold); }
+    .obj { border-top:1px solid #1a4929; padding:5px 0; }
+    .obj small { color:var(--muted); }
+    .obj-child { padding-left:15px; color:#c5e8cd; }
+    .thread { display:flex; justify-content:space-between; gap:8px; border-top:1px solid #1a4929; padding:5px 0; cursor:pointer; }
+    .thread.current { color:var(--gold); }
+    .parallel-panel { height:270px; min-height:170px; margin-top:9px; }
+    .parallel-layout { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .parallel-layout h3 { font-size:12px; color:var(--muted); margin:0 0 5px; }
+    .parallel-cards { display:flex; gap:7px; overflow-x:auto; padding-bottom:6px; min-height:165px; }
+    .lane-card { flex:0 0 275px; height:175px; overflow:auto; border:1px solid var(--line); background:#07130b; padding:7px; }
+    .lane-card.active { border-color:var(--gold); }
+    .lane-title { color:var(--gold); font-weight:700; overflow-wrap:anywhere; }
+    .lane-stack { color:#c6e8ce; font-size:11px; margin:5px 0; }
+    .lane-stack div { overflow-wrap:anywhere; }
+    .lane-actions { display:flex; gap:5px; margin:5px 0; }
+    .lane-actions button { padding:2px 6px; font-size:11px; }
+    .lane-ticks { display:flex; align-items:end; gap:1px; height:13px; overflow:hidden; }
+    .lane-ticks button { flex:1 0 3px; min-width:3px; height:8px; padding:0; border:0; background:#275b36; }
+    .lane-ticks button.call { background:#c38aef; }
+    .lane-ticks button.return { background:#45a7d7; }
+    .lane-ticks button.exception { background:var(--red); }
+    .loop-summary { color:var(--muted); font-size:11px; margin:0 0 4px; }
+    .hint { color:var(--muted); font-size:11px; margin-top:6px; }
+    select { background:#07110c; color:var(--green); border:1px solid var(--line); padding:5px; font:inherit; }
+    #position { margin-left:auto; color:var(--muted); }
+    textarea { width:100%; min-height:80px; resize:vertical; background:#07110c; color:#d2ecd7; border:1px solid var(--line); padding:9px; font:inherit; }
+    .notes { margin-top:9px; }
+    @media (max-width:1100px) { .details { grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); } }
+    @media (max-width:850px) { .parallel-layout { grid-template-columns:1fr; } .parallel-panel { height:420px; } }
+    @media (max-width:700px) { .workspace,.details { grid-template-columns:1fr; } .workspace .panel { height:320px; } }
+  </style>
+</head>
+<body>
+  <header><div><h1>↳ Execution debugger</h1><div class="sub" id="root">Waiting for project…</div></div><div class="live" id="status">● Connecting</div></header>
+  <nav class="viewbar" aria-label="Visible debugger views">
+    <strong>Views</strong>
+    <button data-toggle="program" type="button">Program</button><button data-toggle="stack" type="button">Stack</button><button data-toggle="variables" type="button">Variables</button><button data-toggle="parallel" type="button">Parallel</button><button data-toggle="io" type="button">Function I/O</button><button data-toggle="heap" type="button">Heap</button><button data-toggle="memory" type="button">Memory</button><button data-toggle="threads" type="button">Threads</button><button data-toggle="notes" type="button">Notes</button>
+    <button id="reset-layout" type="button">Reset layout</button><span class="sub">Drag a panel’s lower edge to resize; use ⛶ to fill the screen.</span>
+  </nav>
+  <section class="panel timeline"><h2>Timeline <span class="sub">(purple = call, blue = return, red = exception)</span></h2><div id="strip" class="strip"></div><div class="controls"><button id="prev">‹ Previous event</button><button id="next">Next event ›</button><button id="flow">Function flow: on</button><button id="latest">Follow latest</button><button id="clear">Clear view</button><span id="position">0 steps</span></div><div class="controls" style="margin-top:7px"><button id="pause" class="primary">Pause on next line</button><button id="into" disabled>Step into</button><button id="over" disabled>Step over</button><button id="out" disabled>Step out</button><button id="continue" disabled>Continue</button><button id="continue-all" disabled>Continue all</button><select id="thread-select" aria-label="Thread to pause"><option value="">Any project thread</option></select><span class="sub" id="control-status">Running</span></div></section>
+  <div class="workspace">
+    <section class="panel program" id="panel-program"><div class="panel-heading"><h2>‹› Program</h2><button data-expand="program" aria-label="Expand program view" title="Expand program view">⛶</button></div><div class="file" id="filename">Run your app to start tracing</div><div id="source"></div></section>
+    <section class="panel stack" id="panel-stack"><div class="panel-heading"><h2>Call stack</h2><button data-expand="stack" aria-label="Expand stack view" title="Expand stack view">⛶</button></div><div id="kind" class="sub">No events yet</div><div id="exception" class="exception"></div><div id="frames"></div></section>
+    <section class="panel" id="panel-variables"><div class="panel-heading"><h2>Variables</h2><button data-expand="variables" aria-label="Expand variables view" title="Expand variables view">⛶</button></div><div id="variables" class="kv"></div></section>
+  </div>
+  <section class="panel parallel-panel" id="panel-parallel"><div class="panel-heading"><h2>Parallel execution</h2><button data-expand="parallel" aria-label="Expand parallel execution view" title="Expand parallel execution view">⛶</button></div><div class="parallel-layout"><div><h3>Python threads · live stack and recent events</h3><div id="parallel-threads" class="parallel-cards"></div></div><div><h3>Asyncio event loops · tasks and await chains <label class="sub"><input id="runtime-tasks" type="checkbox"> Runtime tasks</label></h3><div id="parallel-loops" class="loop-summary"></div><div id="parallel-tasks" class="parallel-cards"></div></div></div></section>
+  <div class="details">
+    <section class="panel" id="panel-io"><div class="panel-heading"><h2>Function inputs &amp; output</h2><button data-expand="io" aria-label="Expand function inputs and output view" title="Expand function inputs and output view">⛶</button></div><div id="io" class="kv"></div><div class="hint">Arguments on calls; return values on exits.</div></section>
+    <section class="panel" id="panel-heap"><div class="panel-heading"><h2>Heap · frame references</h2><button data-expand="heap" aria-label="Expand heap view" title="Expand heap view">⛶</button></div><div id="heap"></div><div class="hint">Shallow sizes and bounded previews.</div></section>
+    <section class="panel" id="panel-memory"><div class="panel-heading"><h2>Memory</h2><button data-expand="memory" aria-label="Expand memory view" title="Expand memory view">⛶</button></div><div id="memory" class="kv"></div></section>
+    <section class="panel" id="panel-threads"><div class="panel-heading"><h2>Threads</h2><button data-expand="threads" aria-label="Expand threads view" title="Expand threads view">⛶</button></div><div id="threads"></div></section>
+  </div>
+  <section class="panel notes" id="panel-notes"><div class="panel-heading"><h2 id="notes-title">Notes</h2><button data-expand="notes" aria-label="Expand notes view" title="Expand notes view">⛶</button></div><textarea id="notes" placeholder="Add notes about this execution step…"></textarea><div class="sub">Notes are saved in this browser only.</div></section>
+  <script>
+    const $ = id => document.getElementById(id);
+    const events = [];
+    let selected = -1, follow = true, flow = true, latest = 0, sourceFile = '', root = '', session = '';
+    const flowQueue=[];
+    let latestThreads=[], latestLoops=[], latestControl={paused_threads:[],pause_requests:[]};
+    const viewNames=['program','stack','variables','parallel','io','heap','memory','threads','notes'];
+    const defaultViews=Object.fromEntries(viewNames.map(name=>[name,name!=='notes']));
+    let layout={visible:{...defaultViews},expanded:null,heights:{}};
+    let layoutRoot='';
+    function layoutKey() { return `live-debugger:layout:${layoutRoot}`; }
+    function saveLayout() { if(layoutRoot) localStorage.setItem(layoutKey(),JSON.stringify(layout)); }
+    function applyLayout() {
+      for(const name of viewNames) {
+        const panel=$(`panel-${name}`), visible=layout.visible[name]!==false;
+        panel.hidden=!visible;
+        panel.classList.toggle('expanded',layout.expanded===name && visible);
+        panel.style.height=layout.heights[name] ? `${layout.heights[name]}px` : '';
+        const button=document.querySelector(`[data-toggle="${name}"]`);
+        button.setAttribute('aria-pressed',String(visible));
+        button.textContent=`${button.dataset.label || button.textContent.replace(/ [✓○]$/,'')} ${visible?'✓':'○'}`;
+        button.dataset.label=button.dataset.label || button.textContent.slice(0,-2);
+        const expand=panel.querySelector('[data-expand]');
+        expand.textContent=layout.expanded===name?'×':'⛶';
+        expand.setAttribute('aria-label',`${layout.expanded===name?'Restore':'Expand'} ${name} view`);
+      }
+      document.body.classList.toggle('view-expanded',Boolean(layout.expanded));
+    }
+    function loadLayout(projectRoot) {
+      if(layoutRoot===projectRoot) return;
+      layoutRoot=projectRoot;
+      let saved={};
+      try { saved=JSON.parse(localStorage.getItem(layoutKey()) || '{}') || {}; } catch { saved={}; }
+      layout={visible:{...defaultViews,...saved.visible},expanded:null,heights:saved.heights || {}};
+      applyLayout();
+    }
+    document.querySelectorAll('[data-toggle]').forEach(button=>{
+      button.onclick=()=>{
+        const name=button.dataset.toggle;
+        layout.visible[name]=!layout.visible[name];
+        if(!layout.visible[name] && layout.expanded===name) layout.expanded=null;
+        applyLayout(); saveLayout();
+      };
+    });
+    document.querySelectorAll('[data-expand]').forEach(button=>{
+      button.onclick=()=>{
+        const name=button.dataset.expand;
+        layout.visible[name]=true;
+        layout.expanded=layout.expanded===name?null:name;
+        applyLayout(); saveLayout();
+      };
+    });
+    document.querySelectorAll('.workspace .panel,.details .panel,#panel-parallel').forEach(panel=>{
+      panel.addEventListener('pointerdown',event=>{
+        const rect=panel.getBoundingClientRect();
+        panel.dataset.resizeStart=event.clientX>=rect.right-22 && event.clientY>=rect.bottom-22 ? String(Math.round(rect.height)) : '';
+      });
+      panel.addEventListener('pointerup',()=>{
+        if(layout.expanded || !panel.dataset.resizeStart) return;
+        const name=panel.id.replace('panel-','');
+        const height=Math.round(panel.getBoundingClientRect().height);
+        if(height>=115 && Math.abs(height-Number(panel.dataset.resizeStart))>4) { layout.heights[name]=height; saveLayout(); }
+        panel.dataset.resizeStart='';
+      });
+    });
+    $('reset-layout').onclick=()=>{layout={visible:{...defaultViews},expanded:null,heights:{}};applyLayout();saveLayout();};
+    applyLayout();
+    const notesKey = id => `live-debugger:${root}:${session}:${id}`;
+    function node(tag, text, className='') { const el=document.createElement(tag); el.textContent=text; if(className) el.className=className; return el; }
+    function pairs(target, values) {
+      target.replaceChildren();
+      for(const [name,value] of Object.entries(values)) target.append(node('span',name),node('span',String(value),'value'));
+      if(!Object.keys(values).length) target.append(node('span','—','sub'));
+    }
+    function bytes(value) { return value >= 1048576 ? `${(value/1048576).toFixed(1)} MiB` : `${(value/1024).toFixed(1)} KiB`; }
+    async function show(index) {
+      if (index < 0 || index >= events.length) return;
+      selected=index;
+      const item=events[index], frame=item.frames[0];
+      $('filename').textContent=`${frame.file}:${frame.line}`;
+      $('kind').textContent=`${item.time} · ${item.kind} · ${item.thread}${item.task_name ? ` · ${item.task_name}` : ''}`;
+      $('exception').textContent=item.exception || '';
+      $('position').textContent=`Step ${item.id} · ${index+1} of ${events.length} retained`;
+      $('notes-title').textContent=`Notes for step ${item.id}`;
+      $('notes').value=localStorage.getItem(notesKey(item.id)) || '';
+      $('frames').replaceChildren();
+      item.frames.forEach((f,n) => {
+        const box=node('div','', 'frame');
+        box.append(node('div',`${n===0?'▶':'↳'} ${f.function} · ${f.file}:${f.line}`,'frame-title'));
+        const locals=node('div','', 'locals');
+        for(const [k,v] of Object.entries(f.bindings || {})) locals.append(node('span',k),node('span',v));
+        box.append(locals);
+        $('frames').append(box);
+      });
+      const earlier=events.slice(0,index).reverse().find(event=>event.thread_id===item.thread_id && event.frame_id===item.frame_id);
+      $('variables').replaceChildren();
+      for(const [name,value] of Object.entries(item.locals)) {
+        const changed=earlier && earlier.locals[name]?.value!==value.value;
+        $('variables').append(node('span',name,changed?'changed':''),node('span',`${value.value} · ${value.type}`,`value ${changed?'changed':''}`));
+      }
+      if(!Object.keys(item.locals).length) $('variables').append(node('span','—','sub'));
+      const io=item.kind==='call' ? item.arguments : item.kind==='return' ? {'↳ return':item.return_value,'Duration':`${item.duration_ms} ms`} : {};
+      pairs($('io'),io);
+      $('heap').replaceChildren();
+      Object.entries(item.locals).slice(0,24).forEach(([name,value])=>{
+        const box=node('div','', 'obj');
+        box.append(node('div',`${name}  →  ${value.object_id || 'hidden'}  ·  ${value.type}  ·  ${value.bytes} B`));
+        for(const child of value.children || []) box.append(node('div',`${child.name}: ${child.value}`,'obj-child'));
+        $('heap').append(box);
+      });
+      if(!Object.keys(item.locals).length) $('heap').textContent='No local references in this frame';
+      pairs($('memory'),{'Traced allocations':bytes(item.memory.current),'Peak allocations':bytes(item.memory.peak),'Local shallow sizes':bytes(item.memory.locals_shallow),'Active thread':`${item.thread} · ${item.thread_id}`});
+      document.querySelectorAll('.thread').forEach(row=>row.classList.toggle('current',row.dataset.id===String(item.thread_id)));
+      document.querySelectorAll('.lane-card').forEach(card=>card.classList.toggle('active',card.dataset.thread===String(item.thread_id) || (item.task_id && card.dataset.task===item.task_id)));
+      if (sourceFile !== frame.file) {
+        sourceFile=frame.file;
+        try {
+          const response=await fetch(`/api/source?file=${encodeURIComponent(frame.file)}`);
+          if (!response.ok) throw new Error('Source unavailable');
+          const lines=(await response.text()).split('\n');
+          const frag=document.createDocumentFragment();
+          lines.forEach((line,i) => { const row=node('div','', 'source-line'); row.id=`line-${i+1}`; row.append(node('span',String(i+1),'number'),node('code',line)); frag.append(row); });
+          $('source').replaceChildren(frag);
+        } catch { $('source').textContent='Source unavailable'; }
+      }
+      document.querySelector('.source-line.active')?.classList.remove('active');
+      const active=$(`line-${frame.line}`);
+      if(active) { active.classList.add('active'); active.scrollIntoView({block:'center'}); }
+      document.querySelector('.tick.selected')?.classList.remove('selected');
+      const tick=$(`tick-${item.id}`); if(tick) { tick.classList.add('selected'); tick.scrollIntoView({block:'nearest',inline:'nearest'}); }
+      $('prev').disabled=index===0; $('next').disabled=index===events.length-1;
+    }
+    function renderTimeline(newEvents) {
+      const frag=document.createDocumentFragment();
+      for(const item of newEvents) {
+        const tick=node('button','',`tick ${item.kind}`); tick.id=`tick-${item.id}`; tick.title=`${item.id} ${item.frames[0].file}:${item.frames[0].line}`;
+        tick.onclick=()=>{ follow=false; flow=false; flowQueue.length=0; updateFlowButton(); show(events.findIndex(e=>e.id===item.id)); };
+        frag.append(tick);
+      }
+      $('strip').append(frag);
+      while(events.length>2500) { const old=events.shift(); $(`tick-${old.id}`)?.remove(); selected--; }
+    }
+    function updateFlowButton() { $('flow').textContent=`Function flow: ${flow?'on':'off'}`; }
+    setInterval(()=>{
+      if(!flow || !flowQueue.length) return;
+      const id=flowQueue.shift();
+      const index=events.findIndex(event=>event.id===id);
+      if(index>=0) show(index);
+    },240);
+    function updateControl(state) {
+      latestControl=state;
+      const paused=state.paused_threads || [];
+      const selectedThread=$('thread-select').value;
+      const active=selectedThread ? paused.find(item=>String(item.thread_id)===selectedThread) : paused[0];
+      const requested=(state.pause_requests || []).some(id=>selectedThread ? String(id)===selectedThread : id===null);
+      $('pause').disabled=Boolean(active) || requested;
+      for(const id of ['into','over','out','continue']) $(id).disabled=!active;
+      $('continue-all').disabled=!paused.length && !state.pause_requested;
+      $('control-status').textContent=paused.length ? `${paused.length} thread${paused.length===1?'':'s'} paused${active ? ` · selected event ${active.event}` : ''}` : state.pause_requested ? 'Pause requested…' : state.step_mode ? `Stepping ${state.step_mode}…` : 'Running';
+      $('status').textContent=paused.length ? `● ${paused.length} paused` : '● Live';
+      if(active && follow) { const index=events.findIndex(e=>e.id===active.event); if(index>=0 && selected!==index) show(index); }
+    }
+    function updateThreads(threads) {
+      const select=$('thread-select'), prior=select.value;
+      select.replaceChildren(node('option','Any project thread'));
+      select.firstChild.value='';
+      $('threads').replaceChildren();
+      for(const thread of threads) {
+        const option=node('option',`${thread.name} · ${thread.id}`); option.value=thread.id; select.append(option);
+        const row=node('div',`${thread.name} · ${thread.id}${thread.alive?'':' · ended'}`,'thread'); row.dataset.id=String(thread.id);
+        row.onclick=()=>{ const index=events.findLastIndex(e=>e.thread_id===thread.id); if(index>=0) { follow=false; show(index); } };
+        $('threads').append(row);
+      }
+      if([...select.options].some(option=>option.value===prior)) select.value=prior;
+      updateControl(latestControl);
+    }
+    function inspectEvent(predicate) {
+      const index=events.findLastIndex(predicate);
+      if(index<0) return;
+      follow=false; flow=false; flowQueue.length=0; updateFlowButton(); show(index);
+    }
+    function laneTicks(target, relevant) {
+      const row=node('div','','lane-ticks');
+      for(const item of relevant.slice(-55)) {
+        const tick=node('button','',item.kind);
+        tick.title=`Event ${item.id} · ${item.kind}`;
+        tick.onclick=()=>inspectEvent(event=>event.id===item.id);
+        row.append(tick);
+      }
+      target.append(row);
+    }
+    function renderParallel(threads,loops,state) {
+      latestThreads=threads; latestLoops=loops;
+      const threadBox=$('parallel-threads'), taskBox=$('parallel-tasks');
+      const threadScroll=threadBox.scrollLeft, taskScroll=taskBox.scrollLeft;
+      threadBox.replaceChildren(); taskBox.replaceChildren();
+      for(const thread of threads.slice(0,20)) {
+        const paused=(state.paused_threads || []).some(item=>item.thread_id===thread.id);
+        const card=node('div','','lane-card'); card.dataset.thread=String(thread.id);
+        card.append(node('div',`${thread.name} · ${thread.id}`,'lane-title'));
+        card.append(node('div',`${paused?'Paused':thread.where==='project'?'In project code':'Outside project code'} · last event ${thread.last_event || '—'}`,'sub'));
+        const actions=node('div','','lane-actions');
+        const inspect=node('button','Inspect'); inspect.onclick=()=>{ $('thread-select').value=String(thread.id); inspectEvent(event=>event.thread_id===thread.id); updateControl(latestControl); };
+        const pause=node('button',paused?'Continue':'Pause'); pause.onclick=()=>{ $('thread-select').value=String(thread.id); control(paused?'continue':'pause',{thread_id:thread.id}); };
+        actions.append(inspect,pause); card.append(actions);
+        const stack=node('div','','lane-stack');
+        for(const frame of thread.frames.slice(0,5)) stack.append(node('div',`${frame.function} · ${frame.file}:${frame.line}`));
+        if(!thread.frames.length) stack.textContent='No project stack yet';
+        card.append(stack);
+        laneTicks(card,events.filter(event=>event.thread_id===thread.id));
+        threadBox.append(card);
+      }
+      if(!threads.length) threadBox.append(node('div','No project threads observed yet','sub'));
+      $('parallel-loops').textContent=loops.length ? loops.map(loop=>`Loop ${loop.id} · thread ${loop.thread_id} · ${loop.project_task_count}/${loop.task_count} project tasks · sampled ${loop.updated}`).join('  |  ') : 'No running asyncio event loop observed';
+      const includeRuntime=$('runtime-tasks').checked;
+      for(const loop of loops) for(const task of loop.tasks) {
+        if(!task.project && !includeRuntime) continue;
+        const card=node('div','','lane-card'); card.dataset.task=task.id;
+        card.append(node('div',`${task.name} · ${task.id}`,'lane-title'));
+        card.append(node('div',`${task.state} · loop ${loop.id}`,'sub'));
+        const actions=node('div','','lane-actions');
+        const inspect=node('button','Inspect'); inspect.onclick=()=>{ $('thread-select').value=String(loop.thread_id); inspectEvent(event=>event.task_id===task.id); updateControl(latestControl); };
+        const taskPaused=(state.paused_threads || []).some(item=>item.thread_id===loop.thread_id && item.task_id===task.id);
+        const pause=node('button',taskPaused?'Continue':'Pause task'); pause.onclick=()=>{ $('thread-select').value=String(loop.thread_id); control(taskPaused?'continue':'pause',{thread_id:loop.thread_id,task_id:task.id}); };
+        actions.append(inspect,pause); card.append(actions);
+        const chain=node('div','','lane-stack');
+        for(const frame of task.await_chain.slice(0,7)) {
+          chain.append(node('div',`${frame.function} · ${frame.file}:${frame.line}`));
+          if(frame.project) for(const [name,value] of Object.entries(frame.bindings || {}).slice(0,3)) chain.append(node('div',`  ${name} = ${value}`));
+        }
+        card.append(chain);
+        laneTicks(card,events.filter(event=>event.task_id===task.id));
+        taskBox.append(card);
+      }
+      if(!taskBox.childElementCount) taskBox.append(node('div','No pending project tasks. Asyncio tasks appear here while they are running or awaiting.','sub'));
+      threadBox.scrollLeft=threadScroll; taskBox.scrollLeft=taskScroll;
+      if(selected>=0) { const item=events[selected]; document.querySelectorAll('.lane-card').forEach(card=>card.classList.toggle('active',card.dataset.thread===String(item.thread_id) || (item.task_id && card.dataset.task===item.task_id))); }
+    }
+    $('runtime-tasks').onchange=()=>renderParallel(latestThreads,latestLoops,latestControl);
+    async function control(action, options={}) {
+      try {
+        const thread_id=Object.hasOwn(options,'thread_id') ? options.thread_id : ($('thread-select').value || null);
+        const task_id=options.task_id || null;
+        const response=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,thread_id,task_id})});
+        const state=await response.json();
+        if(!response.ok) throw Error(state.error || 'Control failed');
+        if(action.startsWith('step_') || action==='pause') { follow=true; flow=false; flowQueue.length=0; updateFlowButton(); }
+        updateControl(state);
+      } catch(error) { $('control-status').textContent=error.message; }
+    }
+    async function poll() {
+      try {
+        const response=await fetch(`/api/events?after=${latest}`,{cache:'no-store'});
+        const data=await response.json();
+        if(session && data.session!==session) { events.length=0; flowQueue.length=0; selected=-1; latest=0; sourceFile=''; $('strip').replaceChildren(); }
+        root=data.root; session=data.session; $('root').textContent=root; loadLayout(root);
+        if(data.events.length) {
+          events.push(...data.events); latest=data.latest; renderTimeline(data.events);
+          if(flow) {
+            flowQueue.push(...data.events.filter(event=>['call','return','exception'].includes(event.kind)).map(event=>event.id));
+            if(flowQueue.length>80) flowQueue.splice(0,flowQueue.length-80);
+            if(selected<0 && !flowQueue.length) await show(events.length-1);
+          } else if(follow || selected<0) await show(events.length-1);
+        }
+        updateThreads(data.threads);
+        updateControl(data.control);
+        renderParallel(data.threads,data.loops || [],data.control);
+      } catch { $('status').textContent='● Disconnected'; }
+      setTimeout(poll,650);
+    }
+    $('prev').onclick=()=>{follow=false; flow=false; flowQueue.length=0; updateFlowButton(); show(selected-1);};
+    $('next').onclick=()=>{follow=false; flow=false; flowQueue.length=0; updateFlowButton(); show(selected+1);};
+    $('flow').onclick=()=>{flow=!flow; follow=flow; flowQueue.length=0; updateFlowButton(); if(flow) show(events.length-1);};
+    $('latest').onclick=()=>{follow=true; flow=false; flowQueue.length=0; updateFlowButton(); show(events.length-1);};
+    $('clear').onclick=()=>{events.length=0; flowQueue.length=0; selected=-1; $('strip').replaceChildren(); $('frames').replaceChildren(); $('source').replaceChildren(); $('filename').textContent='Waiting for new events';};
+    $('pause').onclick=()=>control('pause');
+    $('into').onclick=()=>control('step_into');
+    $('over').onclick=()=>control('step_over');
+    $('out').onclick=()=>control('step_out');
+    $('continue').onclick=()=>control('continue');
+    $('continue-all').onclick=()=>control('continue',{thread_id:null});
+    $('notes').oninput=()=>{if(selected>=0) localStorage.setItem(notesKey(events[selected].id),$('notes').value);};
+    window.onkeydown=e=>{ if(e.key==='Escape' && layout.expanded) {layout.expanded=null;applyLayout();saveLayout();return;} if(e.target.tagName==='TEXTAREA') return; if(e.key==='ArrowLeft') $('prev').click(); if(e.key==='ArrowRight') $('next').click(); };
+    poll();
+  </script>
+</body>
+</html>
