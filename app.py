@@ -1,15 +1,17 @@
 """Run with: streamlit run app.py"""
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
+from pathlib import Path
+from typing import cast
 
 import streamlit as st
 
 from rag_eval.adapters import check_connection, persisted_copy, run_live_case
-from rag_eval.core import RagResponse, RetrievedItem, TestCase, make_run
+from rag_eval.core import RagResponse, Result, RetrievedItem, TestCase, make_run
 from rag_eval.datasets import export_case_pack, import_case_pack
 from rag_eval.fixtures import CASES, DOCUMENTS, RESPONSES
+from rag_eval.quiz import is_local_dev_address, load_quiz
 from rag_eval.store import RunStore
 
 
@@ -38,6 +40,17 @@ def init_state() -> None:
         st.session_state.current_run = None
 
 
+def result_row(result: Result) -> dict[str, object]:
+    calculation = result["calculation"]
+    precision = result.get("precision_calculation")
+    return {"Case": result["case"]["id"], "Name": result["case"]["name"],
+            "Category": result["case"]["category"], "Status": result["status"],
+            "Recall@K": calculation["score"] if calculation is not None else None,
+            "Precision@K": precision["score"] if precision is not None else None,
+            "Hits": f"{calculation['numerator']}/{calculation['denominator']}"
+            if calculation is not None else ""}
+
+
 init_state()
 store = RunStore()
 
@@ -47,9 +60,9 @@ with st.sidebar:
     st.divider()
     st.markdown("**Run controls**")
     mode = st.radio("Execution source", ["Offline fixtures", "Live RAG endpoint"],
-                    help="Live runs require an accessible bot API and compatible response mapping.")
+                    help="Live runs require an accessible bot API using the fixture response shape.")
     k = st.number_input("Top K", min_value=1, max_value=100, value=5, step=1)
-    threshold = st.slider("Recall pass threshold", 0.0, 1.0, 1.0, 0.05,
+    threshold = st.slider("Metric pass threshold", 0.0, 1.0, 1.0, 0.05,
                           help="This is a local review threshold, not a universal quality target.")
     selected_ids = st.multiselect("Cases to run", [c.id for c in st.session_state.cases],
                                   default=[c.id for c in st.session_state.cases],
@@ -57,13 +70,17 @@ with st.sidebar:
     st.caption("Every run records its selected cases, K, threshold, and dataset version.")
     run_clicked = st.button("▶ Run selected cases", type="primary", width="stretch", disabled=not selected_ids)
     st.divider()
-    st.caption("Metric 1 of the planned sequence · Recall@K v1.0")
+    st.caption("Retrieval metrics · Recall@K and Precision@K")
 
 st.markdown('<div class="eyebrow">Evaluation workspace</div>', unsafe_allow_html=True)
 st.title("See what your RAG system actually did")
 st.markdown('<p class="subtle">Run cases, inspect ranked evidence, and trace every score back to its inputs.</p>', unsafe_allow_html=True)
 
-tabs = st.tabs(["Overview", "Test cases", "Connections", "Run history", "Compare runs", "Methodology"])
+quiz_enabled = is_local_dev_address(st.get_option("server.address"))
+tab_names = ["Overview", "Test cases", "Connections", "Run history", "Compare runs", "Methodology"]
+if quiz_enabled:
+    tab_names.append("Check understanding")
+tabs = st.tabs(tab_names)
 
 with tabs[2]:
     st.subheader("Connections")
@@ -75,17 +92,6 @@ with tabs[2]:
         bot_token = st.text_input("Access token", type="password", key="bot_token")
         bot_header = st.text_input("Authentication header", value="Authorization", key="bot_header")
         bot_prefix = st.text_input("Token prefix", value="Bearer", key="bot_prefix")
-        a, b = st.columns(2)
-        with a:
-            question_key = st.text_input("Question request field", value="question", key="question_key")
-            answer_path = st.text_input("Answer response path", value="answer", key="answer_path")
-            id_path = st.text_input("Retrieved item ID path", value="id", key="id_path")
-        with b:
-            user_key = st.text_input("User request field", value="user_id", key="user_key")
-            retrieval_path = st.text_input("Ranked retrieval path", value="retrieved", key="retrieval_path")
-            citation_path = st.text_input("Citations path", value="citations", key="citation_path")
-        title_path = st.text_input("Retrieved title path", value="title", key="title_path")
-        text_path = st.text_input("Retrieved text path", value="text", key="text_path")
         bot_timeout = st.number_input("Bot timeout (seconds)", min_value=1, max_value=120, value=30, key="bot_timeout")
         if st.button("Check bot endpoint", disabled=not bot_url):
             check = check_connection(bot_url, token=bot_token, header_name=bot_header, prefix=bot_prefix)
@@ -106,9 +112,8 @@ with tabs[2]:
                 st.success(f"Confluence URL reachable (HTTP {check['status_code']}).")
             else:
                 st.warning(f"Connection check: {check['message']} (HTTP {check['status_code']})")
-        st.markdown("#### Response mapping example")
-        st.code('{"answer": "...", "retrieved": [{"id": "DOC-101", "title": "...", "text": "..."}], "citations": ["DOC-101"]}', language="json")
-        st.caption("Nested values use dotted paths, such as `data.answer` or `trace.hits`.")
+        st.markdown("#### Expected bot response")
+        st.code('{"answer": "...", "retrieved": [{"id": "DOC-101", "title": "...", "text": "...", "source_url": "..."}], "citations": ["DOC-101"]}', language="json")
 
 if run_clicked:
     selected = [case for case in st.session_state.cases if case.id in selected_ids]
@@ -125,19 +130,13 @@ if run_clicked:
                     responses[case.id] = run_live_case(
                         case, url=st.session_state.bot_url, token=st.session_state.bot_token,
                         header_name=st.session_state.bot_header, prefix=st.session_state.bot_prefix,
-                        question_key=st.session_state.question_key, user_key=st.session_state.user_key,
-                        answer_path=st.session_state.answer_path, retrieval_path=st.session_state.retrieval_path,
-                        id_path=st.session_state.id_path, title_path=st.session_state.title_path,
-                        text_path=st.session_state.text_path, citation_path=st.session_state.citation_path,
                         timeout=int(st.session_state.bot_timeout))
                 except Exception as exc:
                     responses[case.id] = exc
     if responses:
-        safe_config = {"source": mode, "selected_case_ids": selected_ids,
+        safe_config: dict[str, object] = {"source": mode, "selected_case_ids": selected_ids,
                        "bot_endpoint": st.session_state.get("bot_url", "") if mode == "Live RAG endpoint" else "",
-                       "response_mapping": {key: st.session_state.get(key) for key in
-                                            ("answer_path", "retrieval_path", "id_path", "title_path", "text_path", "citation_path")}
-                       if mode == "Live RAG endpoint" else {}}
+                       "response_contract": "fixture-v1" if mode == "Live RAG endpoint" else ""}
         run = make_run(selected, responses, mode=mode, k=int(k), threshold=float(threshold), config=safe_config)
         st.session_state.current_run = run
         store.save(persisted_copy(run, include_content=mode == "Offline fixtures"))
@@ -153,7 +152,7 @@ with tabs[0]:
         c1, c2, c3 = st.columns(3)
         c1.metric("Synthetic documents", len(DOCUMENTS))
         c2.metric("Available cases", len(st.session_state.cases))
-        c3.metric("Metrics implemented", 1)
+        c3.metric("Metrics implemented", 2)
     else:
         st.subheader("Latest run")
         st.caption(f"{run['id']} · {run['created_at']} · {run['mode']} · dataset {run['dataset_version']}")
@@ -162,11 +161,7 @@ with tabs[0]:
                                    ("Passed", "Failed", "Not applicable", "Errors")):
             col.metric(label, run["summary"][key])
         st.markdown("#### Case results")
-        st.dataframe([{"Case": r["case"]["id"], "Name": r["case"]["name"],
-                       "Category": r["case"]["category"], "Status": r["status"],
-                       "Recall@K": None if not r["calculation"] else r["calculation"]["score"],
-                       "Hits": "" if not r["calculation"] else f"{r['calculation']['numerator']}/{r['calculation']['denominator']}"}
-                      for r in run["results"]], width="stretch", hide_index=True)
+        st.dataframe([result_row(r) for r in run["results"]], width="stretch", hide_index=True)
         st.markdown("#### Trace inspector")
         chosen = st.selectbox("Inspect case", [r["case"]["id"] for r in run["results"]], key="inspect_case")
         result = next(r for r in run["results"] if r["case"]["id"] == chosen)
@@ -196,6 +191,19 @@ with tabs[0]:
                     st.write("Hits:", ", ".join(calc["hits"]) or "None")
                     st.write("Misses:", ", ".join(calc["misses"]) or "None")
                     st.caption(f"Pass threshold: {run['threshold']:.2f} · Status: {result['status']}")
+            st.markdown("**Precision@K calculation**")
+            precision = result.get("precision_calculation")
+            if precision is None:
+                st.caption("Unavailable in this run.")
+            elif precision["score"] is None:
+                st.warning(precision["reason"])
+            else:
+                st.metric(f"Precision@{precision['k']}", f"{precision['score']:.2f}",
+                          help="Unique relevant IDs in the first K ranks divided by K. Empty slots and duplicates earn no hit.")
+                st.write(f"**{precision['numerator']} relevant hits / {precision['denominator']} ranks = {precision['score']:.2f}**")
+                st.write("Relevant ranks:", ", ".join(map(str, precision["relevant_ranks"])) or "None")
+                st.write("Duplicate ranks:", ", ".join(map(str, precision["duplicate_ranks"])) or "None")
+                st.caption(f"Pass threshold: {run['threshold']:.2f} · Precision status: {result.get('precision_status', 'unknown')}")
             st.markdown("**Ranked retrieved context**")
             retrieved = (result["response"] or {}).get("retrieved", [])
             if retrieved:
@@ -210,6 +218,11 @@ with tabs[0]:
             st.json({"run_id": run["id"], "dataset_version": run["dataset_version"],
                      "run_config": run["config"], "k": run["k"], "threshold": run["threshold"],
                      "case_result": result})
+        trace = result.get("trace")
+        if trace:
+            st.markdown("**Execution events**")
+            st.dataframe(trace["events"], hide_index=True, width="stretch")
+            st.caption(f"Context trace: {trace['retrieved_context_status']} · Captured: {trace['started_at']}")
         st.download_button("Download full run JSON", json.dumps(run, indent=2), file_name=f"{run['id']}.json", mime="application/json")
         st.caption("A synthetic run checks evaluator behavior against fixtures. It does not establish real bot quality or label validity.")
 
@@ -222,9 +235,10 @@ with tabs[1]:
         st.download_button("Download case pack", json.dumps(pack, indent=2),
                            file_name="synthetic-case-pack.json", mime="application/json")
         uploaded = st.file_uploader("Import case pack JSON", type="json")
-        if st.button("Import case pack", disabled=uploaded is None):
+        if st.button("Import case pack", disabled=uploaded is None) and uploaded is not None:
             try:
-                imported_cases, imported_responses = import_case_pack(json.load(uploaded), set(DOCUMENTS))
+                imported_cases, imported_responses = import_case_pack(
+                    cast(dict[str, object], json.load(uploaded)), set(DOCUMENTS))
                 st.session_state.cases = imported_cases
                 st.session_state.responses = imported_responses
                 st.success(f"Imported {len(imported_cases)} cases. The sidebar selection has been refreshed.")
@@ -333,17 +347,19 @@ with tabs[4]:
         if baseline["dataset_version"] != candidate["dataset_version"]:
             st.warning("Dataset versions differ. Score changes may reflect edited cases or labels rather than bot behavior.")
         if baseline["k"] != candidate["k"]:
-            st.warning("K differs between runs. Recall@K scores are not directly comparable.")
+            st.warning("K differs between runs. Retrieval scores are not directly comparable.")
         base_results = {r["case"]["id"]: r for r in baseline["results"]}
         candidate_results = {r["case"]["id"]: r for r in candidate["results"]}
-        rows = []
+        rows: list[dict[str, str | float | None]] = []
         for case_id in sorted(set(base_results) | set(candidate_results)):
-            before = base_results.get(case_id, {})
-            after = candidate_results.get(case_id, {})
-            before_score = (before.get("calculation") or {}).get("score")
-            after_score = (after.get("calculation") or {}).get("score")
-            rows.append({"Case": case_id, "Baseline status": before.get("status", "not run"),
-                         "Candidate status": after.get("status", "not run"),
+            before = base_results.get(case_id)
+            after = candidate_results.get(case_id)
+            before_calc = before["calculation"] if before is not None else None
+            after_calc = after["calculation"] if after is not None else None
+            before_score = before_calc["score"] if before_calc is not None else None
+            after_score = after_calc["score"] if after_calc is not None else None
+            rows.append({"Case": case_id, "Baseline status": before["status"] if before else "not run",
+                         "Candidate status": after["status"] if after else "not run",
                          "Baseline recall": before_score, "Candidate recall": after_score,
                          "Score change": round(after_score - before_score, 4)
                          if before_score is not None and after_score is not None else None})
@@ -353,7 +369,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("What these results mean")
     st.markdown("""
-**1 · Evaluator correctness.** Unit tests prove that Recall@K uses the agreed formula for known IDs, including duplicates, empty retrieval, and unlabeled cases.
+**1 · Evaluator correctness.** Unit tests check Recall@K and Precision@K against known IDs, including duplicates, empty retrieval, and unlabeled cases.
 
 **2 · Bot performance.** A live run can measure the bot only when its API and ranked trace are available. Offline fixture scores are development examples, not evidence of production quality.
 
@@ -361,5 +377,64 @@ with tabs[5]:
 
 **Recall@K definition in this version:** unique labeled relevant IDs present in the first K ranked results, divided by all unique labeled relevant IDs. Duplicates occupy ranks but do not increase the numerator. Cases with no labeled relevant IDs are not applicable. The pass threshold is configurable per run.
 
-**Current limits:** Only Recall@K is implemented. Permission and answer quality scenarios are present as fixtures but are not scored by dedicated metrics yet. Confluence connection testing does not import pages. Live bot mapping is generic until a real API contract is available. External LLM judges are not connected.
+**Precision@K definition in this version:** unique labeled relevant IDs in the first K ranked positions, divided by K. Duplicate hits and unfilled positions earn no hit. With no relevance labels the score is not applicable. Precision measures how clean the top K is; recall measures how much of all relevant evidence it contains.
+
+**Current limits:** Permission and answer quality scenarios are present as fixtures but are not scored by dedicated metrics yet. Confluence connection testing does not import pages. Live bot responses currently use the fixture contract until a real API contract is available. External LLM judges are not connected.
 """)
+
+if quiz_enabled:
+    with tabs[6]:
+        st.subheader("Check understanding")
+        st.caption("Test what has been built so far. Your answers and result stay in this dashboard session.")
+        quiz_folder = Path(__file__).resolve().parent / "study_quiz"
+        try:
+            questions = load_quiz(quiz_folder)
+        except (OSError, ValueError) as exc:
+            st.info(f"Quiz unavailable: {exc}. Add QUESTIONS.md and ANSWER_KEY.md to study_quiz/.")
+        else:
+            if st.session_state.get("quiz_result") is None:
+                with st.form("understanding_quiz"):
+                    section = None
+                    for question in questions:
+                        if question.section != section:
+                            section = question.section
+                            st.markdown(f"#### {section}")
+                        st.markdown(f"**{question.number}. {question.prompt}**")
+                        st.radio(
+                            f"Answer for question {question.number}",
+                            list(question.options),
+                            index=None,
+                            format_func=lambda choice, options=question.options: f"{choice}. {options[choice]}",
+                            key=f"quiz_answer_{question.number}",
+                            label_visibility="collapsed",
+                        )
+                    submitted = st.form_submit_button("Submit answers", type="primary")
+                if submitted:
+                    answers = {q.number: st.session_state.get(f"quiz_answer_{q.number}") for q in questions}
+                    unanswered = [number for number, answer in answers.items() if answer is None]
+                    if unanswered:
+                        st.warning(f"Answer all {len(questions)} questions before submitting. Unanswered: {', '.join(map(str, unanswered))}.")
+                    else:
+                        st.session_state.quiz_result = answers
+                        st.rerun()
+            else:
+                answers = st.session_state.quiz_result
+                correct = sum(answers.get(q.number) == q.answer for q in questions)
+                st.metric("Your score", f"{correct}/{len(questions)}", f"{correct / len(questions):.0%}")
+                st.progress(correct / len(questions))
+                if correct == len(questions):
+                    st.success("All answers correct.")
+                else:
+                    st.info(f"{len(questions) - correct} question(s) to review. Your answers and the correct answers are below.")
+                for question in questions:
+                    chosen = answers.get(question.number)
+                    is_correct = chosen == question.answer
+                    with st.expander(f"{'✅' if is_correct else '❌'} {question.number}. {question.prompt}", expanded=not is_correct):
+                        st.write(f"Your answer: **{chosen}. {question.options.get(chosen, 'No answer')}**")
+                        st.write(f"Correct answer: **{question.answer}. {question.options[question.answer]}**")
+                        st.write(question.explanation)
+                if st.button("Retake quiz"):
+                    st.session_state.quiz_result = None
+                    for question in questions:
+                        st.session_state.pop(f"quiz_answer_{question.number}", None)
+                    st.rerun()
