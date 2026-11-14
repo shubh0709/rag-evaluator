@@ -1,29 +1,31 @@
 """Configurable HTTP boundaries. Tokens are passed at call time and never persisted."""
 from __future__ import annotations
 
-from typing import Any
+from typing import TypedDict, cast
 from urllib.parse import urlparse
 
 import requests
 
-from .core import RagResponse, RetrievedItem, TestCase
+from .core import RagResponse, RetrievedItem, Run, TestCase
+
+
+class RetrievedItemData(TypedDict):
+    id: str
+    title: str
+    text: str
+    source_url: str
+
+
+class BotResponseData(TypedDict):
+    answer: str
+    retrieved: list[RetrievedItemData]
+    citations: list[str]
 
 
 def validate_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Enter a full http(s) URL")
-
-
-def path_get(value: Any, path: str, default: Any = None) -> Any:
-    if not path:
-        return default
-    for part in path.split("."):
-        try:
-            value = value[int(part)] if isinstance(value, list) else value[part]
-        except (KeyError, IndexError, ValueError, TypeError):
-            return default
-    return value
 
 
 def auth_headers(token: str, header_name: str = "Authorization", prefix: str = "Bearer") -> dict[str, str]:
@@ -35,7 +37,7 @@ def auth_headers(token: str, header_name: str = "Authorization", prefix: str = "
 
 
 def check_connection(url: str, *, token: str = "", header_name: str = "Authorization",
-                     prefix: str = "Bearer", timeout: int = 10) -> dict[str, Any]:
+                     prefix: str = "Bearer", timeout: int = 10) -> dict[str, object]:
     validate_url(url)
     try:
         response = requests.get(url, headers=auth_headers(token, header_name, prefix), timeout=timeout)
@@ -49,36 +51,32 @@ def check_connection(url: str, *, token: str = "", header_name: str = "Authoriza
 
 
 def run_live_case(case: TestCase, *, url: str, token: str, header_name: str,
-                  prefix: str, question_key: str, user_key: str, answer_path: str,
-                  retrieval_path: str, id_path: str, title_path: str, text_path: str,
-                  citation_path: str, timeout: int = 30) -> RagResponse:
+                  prefix: str, timeout: int = 30) -> RagResponse:
     validate_url(url)
-    payload = {question_key: case.question}
-    if user_key:
-        payload[user_key] = case.user_id
+    payload = {"question": case.question, "user_id": case.user_id}
     response = requests.post(url, json=payload, headers=auth_headers(token, header_name, prefix), timeout=timeout)
     response.raise_for_status()
-    data = response.json()
-    if not isinstance(data, dict):
-        raise ValueError("Bot response must be a JSON object")
-    answer = path_get(data, answer_path)
-    retrieved = path_get(data, retrieval_path)
-    if not isinstance(answer, str) or not isinstance(retrieved, list):
-        raise ValueError("Response mapping failed: answer string or ranked retrieval list missing")
-    items = []
+    raw_data: object = response.json()
+    if not isinstance(raw_data, dict) or not isinstance(raw_data.get("answer"), str):
+        raise ValueError("Bot response must contain an answer string")
+    retrieved = raw_data.get("retrieved")
+    if not isinstance(retrieved, list):
+        raise ValueError("Bot response must contain a ranked retrieved list")
     for rank, entry in enumerate(retrieved, 1):
-        item_id = path_get(entry, id_path)
-        if not isinstance(item_id, str) or not item_id:
-            raise ValueError(f"Retrieved item at rank {rank} has no string ID")
-        items.append(RetrievedItem(item_id, str(path_get(entry, title_path, "") or ""),
-                                   str(path_get(entry, text_path, "") or "")))
-    citations = path_get(data, citation_path, [])
-    if not isinstance(citations, list):
-        citations = []
-    return RagResponse(answer, tuple(items), tuple(str(c) for c in citations), raw={"response_keys": list(data)})
+        if (not isinstance(entry, dict) or not isinstance(entry.get("id"), str)
+                or not entry["id"] or not all(isinstance(entry.get(key), str)
+                                               for key in ("title", "text", "source_url"))):
+            raise ValueError(f"Retrieved item at rank {rank} must have string id, title, text, and source_url")
+    citations = raw_data.get("citations")
+    if not isinstance(citations, list) or not all(isinstance(citation, str) for citation in citations):
+        raise ValueError("Bot response must contain a citations string list")
+    data: BotResponseData = cast(BotResponseData, raw_data)
+    items = tuple(RetrievedItem(item["id"], item["title"], item["text"], item["source_url"])
+                  for item in data["retrieved"])
+    return RagResponse(data["answer"], items, tuple(data["citations"]), raw={"response_keys": list(data)})
 
 
-def persisted_copy(run: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
+def persisted_copy(run: Run, *, include_content: bool) -> Run:
     """Remove live question and response text from disk unless explicitly requested."""
     if include_content:
         return run
