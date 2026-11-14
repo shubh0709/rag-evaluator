@@ -7,5 +7,6 @@ artifacts/runs/*.json
 docs/
 study_quiz/
 .DS_Store
+.env
 .agents/skills/developing-with-streamlit
 .claude/
