@@ -1,51 +1,122 @@
 """Run with: streamlit run app.py"""
+
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import cast
+from typing import Any
 
 import streamlit as st
+import requests
 
 from rag_eval.adapters import check_connection, persisted_copy, run_live_case
-from rag_eval.core import RagResponse, Result, RetrievedItem, TestCase, make_run, with_recomputed_mrr
-from rag_eval.datasets import export_case_pack, import_case_pack
+from rag_eval.core import (
+    RagResponse,
+    Result,
+    TestCase,
+    make_run,
+    with_recomputed_mrr,
+)
 from rag_eval.fixtures import CASES, DOCUMENTS, RESPONSES
-from rag_eval.quiz import is_local_dev_address, load_quiz
+from rag_eval.generation_fixtures import (
+    MODEL as FIXTURE_JUDGE_MODEL,
+    MODEL_VERSION as FIXTURE_JUDGE_VERSION,
+    fixture_judge,
+)
+from rag_eval.generation_judge import (
+    RUBRICS,
+    call_judge_endpoint,
+    evaluate_generation_run,
+    review_judgment,
+)
+from rag_eval.openai_judge import load_openai_config, openai_judge
+from rag_eval.quiz import is_local_dev_address
 from rag_eval.store import RunStore
+from rag_eval.ui_views import (
+    render_case_editor,
+    render_history,
+    render_comparison,
+    render_interpretation,
+    render_guide,
+    render_quiz,
+)
 
-
-st.set_page_config(page_title="Confluence RAG Lab", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
-st.markdown("""
+st.set_page_config(
+    page_title="Confluence RAG Lab", page_icon="◈", layout="wide", initial_sidebar_state="expanded"
+)
+st.markdown(
+    """
 <style>
   .block-container {padding-top: 1.4rem; max-width: 1500px;}
   h1,h2,h3 {letter-spacing:-0.035em;}
   h1 {font-size:2.35rem!important;}
-  div[data-testid="stMetric"] {border:1px solid #dde6e2; border-radius:14px; padding:14px; background:#fbfdfb;}
+  div[data-testid="stMetric"] {
+    border:1px solid #dde6e2; border-radius:14px;
+    padding:14px; background:#fbfdfb;
+  }
   div[data-testid="stAlert"] {border-radius:12px;}
   div[data-testid="stVerticalBlockBorderWrapper"] {border-radius:14px;}
-  .eyebrow {color:#477566; letter-spacing:.12em; text-transform:uppercase; font-size:.76rem; font-weight:750;}
+  .eyebrow {
+    color:#477566; letter-spacing:.12em; text-transform:uppercase;
+    font-size:.76rem; font-weight:750;
+  }
   .subtle {color:#68756f;}
-  .badge {display:inline-block; padding:5px 10px; border-radius:99px; background:#e7f3ec; color:#155a3d; font-size:.78rem; font-weight:700;}
+  .badge {
+    display:inline-block; padding:5px 10px; border-radius:99px;
+    background:#e7f3ec; color:#155a3d; font-size:.78rem; font-weight:700;
+  }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 def init_state() -> None:
+    """Initialize the session state required by the app."""
     if "cases" not in st.session_state:
         st.session_state.cases = list(CASES)
     else:
         fixtures = {case.id: case for case in CASES}
         st.session_state.cases = [
-            case if all(hasattr(case, field) for field in
-                        ("relevance_grades", "context_relevance", "reference_points", "point_support")) else TestCase(
-                case.id, case.name, case.question, case.relevant_ids, case.expected_answer,
-                case.category, case.user_id, case.notes, case.supporting_evidence,
-                getattr(case, "relevance_grades", fixtures.get(case.id).relevance_grades if case.id in fixtures else {}),
-                fixtures[case.id].context_relevance if case.id in fixtures else {},
-                fixtures[case.id].reference_points if case.id in fixtures else (),
-                fixtures[case.id].point_support if case.id in fixtures else {})
+            (
+                case
+                if all(
+                    hasattr(case, field)
+                    for field in (
+                        "relevance_grades",
+                        "context_relevance",
+                        "reference_points",
+                        "point_support",
+                        "exact_match_references",
+                        "answerable",
+                        "trap_prior_answer",
+                        "trap_context_answer",
+                    )
+                )
+                else TestCase(
+                    case.id,
+                    case.name,
+                    case.question,
+                    case.relevant_ids,
+                    case.expected_answer,
+                    case.category,
+                    case.user_id,
+                    case.notes,
+                    case.supporting_evidence,
+                    getattr(
+                        case,
+                        "relevance_grades",
+                        fixtures[case.id].relevance_grades if case.id in fixtures else {},
+                    ),
+                    fixtures[case.id].context_relevance if case.id in fixtures else {},
+                    fixtures[case.id].reference_points if case.id in fixtures else (),
+                    fixtures[case.id].point_support if case.id in fixtures else {},
+                    fixtures[case.id].exact_match_references if case.id in fixtures else (),
+                    fixtures[case.id].answerable if case.id in fixtures else None,
+                    fixtures[case.id].trap_prior_answer if case.id in fixtures else "",
+                    fixtures[case.id].trap_context_answer if case.id in fixtures else "",
+                )
+            )
             for case in st.session_state.cases
         ]
     if "responses" not in st.session_state:
@@ -54,38 +125,52 @@ def init_state() -> None:
         st.session_state.current_run = None
 
 
-def result_row(result: Result) -> dict[str, object]:
-    calculation = result["calculation"]
-    precision = result.get("precision_calculation")
-    rr = result.get("reciprocal_rank_calculation")
-    ndcg = result.get("ndcg_calculation")
-    ap = result.get("average_precision_calculation")
-    cp = result.get("context_precision_calculation")
-    cr = result.get("context_recall_calculation")
-    return {"Case": result["case"]["id"], "Name": result["case"]["name"],
-            "Category": result["case"]["category"],
-            "Recall@K": calculation["score"] if calculation is not None else None,
-            "Precision@K": precision["score"] if precision is not None else None,
-            "Reciprocal rank": rr["score"] if rr is not None else None,
-            "NDCG@K": ndcg["score"] if ndcg is not None else None,
-            "Average precision": ap["score"] if ap is not None else None,
-            "Context precision": cp["score"] if cp is not None else None,
-            "Context recall": cr["score"] if cr is not None else None,
-            "Recall status": result["status"],
-            "Precision status": result.get("precision_status", "not recorded"),
-            "RR status": result.get("reciprocal_rank_status", "not recorded"),
-            "NDCG status": result.get("ndcg_status", "not recorded"),
-            "AP status": result.get("average_precision_status", "not recorded"),
-            "Context precision status": result.get("context_precision_status", "not recorded"),
-            "Context recall status": result.get("context_recall_status", "not recorded"),
-            "Hits": f"{calculation['numerator']}/{calculation['denominator']}"
-            if calculation is not None else ""}
+def result_row(metric_result: Result) -> dict[str, object]:
+    """Convert a metric result into a table row."""
+    calculation = metric_result["calculation"]
+    metric_precision = metric_result.get("precision_calculation")
+    metric_rr = metric_result.get("reciprocal_rank_calculation")
+    metric_ndcg = metric_result.get("ndcg_calculation")
+    metric_ap = metric_result.get("average_precision_calculation")
+    metric_cp = metric_result.get("context_precision_calculation")
+    metric_cr = metric_result.get("context_recall_calculation")
+    metric_em = metric_result.get("exact_match_calculation")
+    metric_f1 = metric_result.get("token_f1_calculation")
+    return {
+        "Case": metric_result["case"]["id"],
+        "Name": metric_result["case"]["name"],
+        "Category": metric_result["case"]["category"],
+        "Recall@K": calculation["score"] if calculation is not None else None,
+        "Precision@K": metric_precision["score"] if metric_precision is not None else None,
+        "Reciprocal rank": metric_rr["score"] if metric_rr is not None else None,
+        "NDCG@K": metric_ndcg["score"] if metric_ndcg is not None else None,
+        "Average precision": metric_ap["score"] if metric_ap is not None else None,
+        "Context precision": metric_cp["score"] if metric_cp is not None else None,
+        "Context recall": metric_cr["score"] if metric_cr is not None else None,
+        "Exact Match": metric_em["score"] if metric_em is not None else None,
+        "Token F1": metric_f1["score"] if metric_f1 is not None else None,
+        "Recall status": metric_result["status"],
+        "Precision status": metric_result.get("precision_status", "not recorded"),
+        "RR status": metric_result.get("reciprocal_rank_status", "not recorded"),
+        "NDCG status": metric_result.get("ndcg_status", "not recorded"),
+        "AP status": metric_result.get("average_precision_status", "not recorded"),
+        "Context precision status": metric_result.get("context_precision_status", "not recorded"),
+        "Context recall status": metric_result.get("context_recall_status", "not recorded"),
+        "Exact Match status": metric_result.get("exact_match_status", "not recorded"),
+        "Token F1 status": metric_result.get("token_f1_status", "not recorded"),
+        "Hits": (
+            f"{calculation['numerator']}/{calculation['denominator']}"
+            if calculation is not None
+            else ""
+        ),
+    }
 
 
 METRIC_HELP = {
     "recall": (
         "**Recall@K:** The share of all labeled relevant documents found in the first K results. "
-        "Each document counts once. Example: if A, B, and C are relevant and the top 2 are A and X, "
+        "Each document counts once. Example: if A, B, and C are relevant "
+        "and the top 2 are A and X, "
         "Recall@2 is 1/3 = 0.33."
     ),
     "precision": (
@@ -95,11 +180,13 @@ METRIC_HELP = {
     ),
     "reciprocal_rank": (
         "**Reciprocal rank:** 1 divided by the position of the first relevant document in the "
-        "full ranked list; 0 if none is found. Example: first relevant document at rank 3 gives 1/3 = 0.33."
+        "full ranked list; 0 if none is found. Example: first relevant "
+        "document at rank 3 gives 1/3 = 0.33."
     ),
     "mrr": (
         "**Mean reciprocal rank (MRR):** The average reciprocal rank across scored cases. "
-        "It uses the full ranked list, independent of K. Example: if two cases first find a relevant "
+        "It uses the full ranked list, independent of K. Example: if two "
+        "cases first find a relevant "
         "document at ranks 1 and 3, MRR is (1 + 1/3) / 2 = 0.67."
     ),
     "ndcg": (
@@ -128,6 +215,19 @@ METRIC_HELP = {
         "least one retrieved context. Example: if retrieved contexts support 2 of 3 required "
         "answer points, context recall is 2/3 = 0.67."
     ),
+    "exact_match": (
+        "**Exact Match:** 1 when the normalized answer equals any "
+        "explicit gold answer, otherwise 0. "
+        "Normalization casefolds text, removes punctuation and English articles (a, an, the), "
+        "and collapses whitespace. It is suitable for short checkable answers; a correct longer "
+        "sentence can still score 0."
+    ),
+    "token_f1": (
+        "**Token F1:** Bag-of-tokens overlap after the same normalization as Exact Match. "
+        "For each gold answer, precision = overlap / answer tokens and "
+        "recall = overlap / gold tokens; "
+        "F1 = 2PR/(P+R). The highest reference score wins."
+    ),
 }
 
 RESULT_METRIC_COLUMNS = {
@@ -138,6 +238,8 @@ RESULT_METRIC_COLUMNS = {
     "Average precision": "average_precision",
     "Context precision": "context_precision",
     "Context recall": "context_recall",
+    "Exact Match": "exact_match",
+    "Token F1": "token_f1",
 }
 
 RESULT_STATUS_COLUMNS = {
@@ -148,6 +250,8 @@ RESULT_STATUS_COLUMNS = {
     "AP status": "average_precision",
     "Context precision status": "context_precision",
     "Context recall status": "context_recall",
+    "Exact Match status": "exact_match",
+    "Token F1 status": "token_f1",
 }
 
 STATUS_HELP = (
@@ -166,61 +270,162 @@ with st.sidebar:
     st.caption("Confluence evaluation workspace")
     st.divider()
     st.markdown("**Run controls**")
-    mode = st.radio("Execution source", ["Offline fixtures", "Live RAG endpoint"],
-                    help="Live runs require an accessible bot API using the fixture response shape.")
+    mode = st.radio(
+        "Execution source",
+        ["Offline fixtures", "Live RAG endpoint"],
+        help="Live runs require an accessible bot API using the fixture response shape.",
+    )
     k = st.number_input("Top K", min_value=1, max_value=100, value=5, step=1)
-    threshold = st.slider("Metric pass threshold", 0.0, 1.0, 1.0, 0.05,
-                          help="This is a local review threshold, not a universal quality target.")
-    selected_ids = st.multiselect("Cases to run", [c.id for c in st.session_state.cases],
-                                  default=[c.id for c in st.session_state.cases],
-                                  format_func=lambda x: next((f"{x} · {c.name}" for c in st.session_state.cases if c.id == x), x))
+    threshold = st.slider(
+        "Metric pass threshold",
+        0.0,
+        1.0,
+        1.0,
+        0.05,
+        help="This is a local review threshold, not a universal quality target.",
+    )
+    selected_ids = st.multiselect(
+        "Cases to run",
+        [c.id for c in st.session_state.cases],
+        default=[c.id for c in st.session_state.cases],
+        format_func=lambda x: next(
+            (f"{x} · {c.name}" for c in st.session_state.cases if c.id == x), x
+        ),
+    )
     st.caption("Every run records its selected cases, K, threshold, and dataset version.")
-    run_clicked = st.button("▶ Run selected cases", type="primary", width="stretch", disabled=not selected_ids)
+    run_clicked = st.button(
+        "▶ Run selected cases", type="primary", width="stretch", disabled=not selected_ids
+    )
+    st.markdown("**Generation judge**")
+    judge_mode = st.selectbox(
+        "Judge source",
+        ["Synthetic reviewed labels", "OpenAI (.env)", "Approved judge gateway", "Off"],
+        index=0 if mode == "Offline fixtures" else 3,
+        help="Synthetic labels exercise the trace; they are not LLM results.",
+    )
+    judge_url = judge_token = judge_model = judge_version = ""
+    judge_approved = False
+    judge_metrics = tuple(RUBRICS)
+    if judge_mode == "OpenAI (.env)":
+        judge_metrics = tuple(
+            st.multiselect(
+                "OpenAI judge metrics",
+                list(RUBRICS),
+                default=["faithfulness"],
+                help=(
+                    "Start with one metric and a small synthetic case selection to "
+                    "control API calls."
+                ),
+            )
+        )
+        judge_approved = st.checkbox(
+            (
+                "Approve sending selected questions, retrieved evidence, answers, "
+                "and references to OpenAI"
+            ),
+            value=False,
+            help="Applies to this run only. The selected cases are sent to the OpenAI API.",
+        )
+    if judge_mode == "Approved judge gateway":
+        judge_url = st.text_input("Judge gateway URL", key="judge_url")
+        judge_model = st.text_input("Judge model", key="judge_model")
+        judge_version = st.text_input("Judge model version", key="judge_version")
+        judge_token = st.text_input("Judge token", type="password", key="judge_token")
+        judge_approved = st.checkbox("Provider and data class approved for this run", value=False)
     st.divider()
-    st.caption("Metrics · Recall@K, Precision@K, MRR, NDCG@K, MAP, context precision, context recall")
+    st.caption("Metrics · 7 retrieval, 2 deterministic generation, 7 judge based generation")
 
 st.markdown('<div class="eyebrow">Evaluation workspace</div>', unsafe_allow_html=True)
 st.title("See what your RAG system actually did")
-st.markdown('<p class="subtle">Run cases, inspect ranked evidence, and trace every score back to its inputs.</p>', unsafe_allow_html=True)
+st.markdown(
+    (
+        '<p class="subtle">Run cases, inspect ranked evidence, and trace '
+        "every score back to its inputs.</p>"
+    ),
+    unsafe_allow_html=True,
+)
 
 quiz_enabled = is_local_dev_address(st.get_option("server.address"))
-tab_names = ["Overview", "Test cases", "Connections", "Run history", "Compare runs", "Methodology"]
+tab_names = [
+    "Overview",
+    "Test cases",
+    "Connections",
+    "Run history",
+    "Compare runs",
+    "Methodology",
+    "Metric explanations",
+]
 if quiz_enabled:
     tab_names.append("Check understanding")
 tabs = st.tabs(tab_names)
 
 with tabs[2]:
     st.subheader("Connections")
-    st.info("No bot or Confluence access is available yet. Configure endpoints here when access is granted. Connection settings stay in this browser session; tokens are never written to run artifacts.")
+    st.info(
+        "No bot or Confluence access is available yet. Configure "
+        "endpoints here when access is granted. Connection settings stay "
+        "in this browser session; tokens are never written to run "
+        "artifacts."
+    )
     left, right = st.columns(2, gap="large")
     with left:
         st.markdown("#### RAG chatbot")
-        bot_url = st.text_input("POST endpoint URL", key="bot_url", placeholder="https://bot.example.com/api/ask")
+        bot_url = st.text_input(
+            "POST endpoint URL", key="bot_url", placeholder="https://bot.example.com/api/ask"
+        )
         bot_token = st.text_input("Access token", type="password", key="bot_token")
         bot_header = st.text_input("Authentication header", value="Authorization", key="bot_header")
         bot_prefix = st.text_input("Token prefix", value="Bearer", key="bot_prefix")
-        bot_timeout = st.number_input("Bot timeout (seconds)", min_value=1, max_value=120, value=30, key="bot_timeout")
+        bot_timeout = st.number_input(
+            "Bot timeout (seconds)", min_value=1, max_value=120, value=30, key="bot_timeout"
+        )
         if st.button("Check bot endpoint", disabled=not bot_url):
-            check = check_connection(bot_url, token=bot_token, header_name=bot_header, prefix=bot_prefix)
+            check = check_connection(
+                bot_url, token=bot_token, header_name=bot_header, prefix=bot_prefix
+            )
             if check["ok"]:
-                st.success(f"{check['message']} (HTTP {check['status_code']}). This does not validate the POST response contract.")
+                st.success(
+                    (
+                        f"{check['message']} (HTTP {check['status_code']}). "
+                        "This does not validate the POST response contract."
+                    )
+                )
             else:
                 st.warning(f"Connection check: {check['message']} (HTTP {check['status_code']})")
     with right:
         st.markdown("#### Confluence")
-        st.caption("This checks access only. The evaluator does not ingest Confluence pages until the corpus and permissions contract is approved.")
-        conf_url = st.text_input("Confluence test URL", key="conf_url", placeholder="https://example.atlassian.net/wiki/rest/api/user/current")
+        st.caption(
+            "This checks access only. The evaluator does not ingest "
+            "Confluence pages until the corpus and permissions contract is "
+            "approved."
+        )
+        conf_url = st.text_input(
+            "Confluence test URL",
+            key="conf_url",
+            placeholder="https://example.atlassian.net/wiki/rest/api/user/current",
+        )
         conf_token = st.text_input("Confluence access token", type="password", key="conf_token")
-        conf_header = st.text_input("Confluence auth header", value="Authorization", key="conf_header")
+        conf_header = st.text_input(
+            "Confluence auth header", value="Authorization", key="conf_header"
+        )
         conf_prefix = st.text_input("Confluence token prefix", value="Bearer", key="conf_prefix")
         if st.button("Check Confluence access", disabled=not conf_url):
-            check = check_connection(conf_url, token=conf_token, header_name=conf_header, prefix=conf_prefix)
+            check = check_connection(
+                conf_url, token=conf_token, header_name=conf_header, prefix=conf_prefix
+            )
             if check["ok"]:
                 st.success(f"Confluence URL reachable (HTTP {check['status_code']}).")
             else:
                 st.warning(f"Connection check: {check['message']} (HTTP {check['status_code']})")
         st.markdown("#### Expected bot response")
-        st.code('{"answer": "...", "retrieved": [{"id": "DOC-101", "title": "...", "text": "...", "source_url": "..."}], "citations": ["DOC-101"]}', language="json")
+        st.code(
+            (
+                '{"answer": "...", "retrieved": [{"id": "DOC-101", "title": '
+                '"...", "text": "...", "source_url": "..."}], "citations": '
+                '["DOC-101"]}'
+            ),
+            language="json",
+        )
 
 if run_clicked:
     selected = [case for case in st.session_state.cases if case.id in selected_ids]
@@ -229,7 +434,9 @@ if run_clicked:
     if mode == "Offline fixtures":
         for case in selected:
             started = datetime.now(timezone.utc).isoformat()
-            responses[case.id] = st.session_state.responses.get(case.id, ValueError("No offline response configured"))
+            responses[case.id] = st.session_state.responses.get(
+                case.id, ValueError("No offline response configured")
+            )
             execution_times[case.id] = (started, datetime.now(timezone.utc).isoformat())
     elif not st.session_state.get("bot_url"):
         st.error("Set the RAG chatbot POST endpoint in Connections before running live cases.")
@@ -239,19 +446,115 @@ if run_clicked:
                 started = datetime.now(timezone.utc).isoformat()
                 try:
                     responses[case.id] = run_live_case(
-                        case, url=st.session_state.bot_url, token=st.session_state.bot_token,
-                        header_name=st.session_state.bot_header, prefix=st.session_state.bot_prefix,
-                        timeout=int(st.session_state.bot_timeout))
-                except Exception as exc:
+                        case,
+                        url=st.session_state.bot_url,
+                        token=st.session_state.bot_token,
+                        header_name=st.session_state.bot_header,
+                        prefix=st.session_state.bot_prefix,
+                        timeout=int(st.session_state.bot_timeout),
+                    )
+                except (requests.RequestException, ValueError, TypeError, RuntimeError) as exc:
                     responses[case.id] = exc
                 finally:
                     execution_times[case.id] = (started, datetime.now(timezone.utc).isoformat())
     if responses:
-        safe_config: dict[str, object] = {"source": mode, "selected_case_ids": selected_ids,
-                       "bot_endpoint": st.session_state.get("bot_url", "") if mode == "Live RAG endpoint" else "",
-                       "response_contract": "fixture-v1" if mode == "Live RAG endpoint" else ""}
-        run = make_run(selected, responses, mode=mode, k=int(k), threshold=float(threshold),
-                       config=safe_config, execution_times=execution_times)
+        safe_config: dict[str, object] = {
+            "source": mode,
+            "selected_case_ids": selected_ids,
+            "bot_endpoint": (
+                st.session_state.get("bot_url", "") if mode == "Live RAG endpoint" else ""
+            ),
+            "response_contract": "fixture-v1" if mode == "Live RAG endpoint" else "",
+        }
+        run = make_run(
+            selected,
+            responses,
+            mode=mode,
+            k=int(k),
+            threshold=float(threshold),
+            config=safe_config,
+            execution_times=execution_times,
+        )
+        valid_responses = {
+            case_id: response
+            for case_id, response in responses.items()
+            if isinstance(response, RagResponse)
+        }
+        if judge_mode == "Synthetic reviewed labels" and mode == "Offline fixtures":
+            run = evaluate_generation_run(
+                run,
+                selected,
+                valid_responses,
+                fixture_judge,
+                model=FIXTURE_JUDGE_MODEL,
+                model_version=FIXTURE_JUDGE_VERSION,
+            )
+            run["config"]["judge_source"] = "synthetic-reviewed-labels"
+        elif judge_mode == "OpenAI (.env)":
+            if not judge_approved:
+                st.warning(
+                    "OpenAI judge skipped: approve sending the selected case content "
+                    "to OpenAI first."
+                )
+            elif not judge_metrics:
+                st.warning("OpenAI judge skipped: select at least one metric.")
+            else:
+                try:
+                    openai_key, openai_model = load_openai_config()
+
+                    def judge_call(payload: dict[str, Any]) -> dict[str, Any]:
+                        """Call the configured judge for this evaluation."""
+                        return openai_judge(payload, api_key=openai_key, model=openai_model)
+
+                    run = evaluate_generation_run(
+                        run,
+                        selected,
+                        valid_responses,
+                        judge_call,
+                        model=openai_model,
+                        model_version=openai_model,
+                        metrics=judge_metrics,
+                    )
+                    run["config"].update(
+                        {
+                            "judge_source": "openai-responses",
+                            "judge_model": openai_model,
+                            "judge_metrics": list(judge_metrics),
+                        }
+                    )
+                except ValueError as exc:
+                    st.error(f"OpenAI judge configuration: {exc}")
+        elif judge_mode == "Approved judge gateway":
+            if not (judge_approved and judge_url and judge_model and judge_version):
+                st.warning(
+                    "Judge gateway skipped: confirm provider approval and supply URL, "
+                    "model, and version."
+                )
+            else:
+
+                def judge_call(payload: dict[str, Any]) -> dict[str, Any]:
+                    """Call the configured judge for this evaluation."""
+                    return call_judge_endpoint(
+                        {**payload, "model": judge_model, "model_version": judge_version},
+                        url=judge_url,
+                        token=judge_token,
+                    )
+
+                run = evaluate_generation_run(
+                    run,
+                    selected,
+                    valid_responses,
+                    judge_call,
+                    model=judge_model,
+                    model_version=judge_version,
+                )
+                run["config"].update(
+                    {
+                        "judge_source": "approved-gateway",
+                        "judge_model": judge_model,
+                        "judge_model_version": judge_version,
+                    }
+                )
         st.session_state.current_run = run
         store.save(persisted_copy(run, include_content=mode == "Offline fixtures"))
         st.toast(f"Run {run['id']} completed", icon="✅")
@@ -265,66 +568,141 @@ with tabs[0]:
     if run is not None:
         run = with_recomputed_mrr(run)
     if run is None:
-        st.info("Ready to run. Select cases and press **Run selected cases** in the sidebar. The first run uses the included synthetic fixtures.")
+        st.info(
+            "Ready to run. Select cases and press **Run selected cases** in "
+            "the sidebar. The first run uses the included synthetic fixtures."
+        )
         c1, c2, c3 = st.columns(3)
         c1.metric("Synthetic documents", len(DOCUMENTS))
         c2.metric("Available cases", len(st.session_state.cases))
-        c3.metric("Metrics implemented", 7)
+        c3.metric("Metrics implemented", 16)
     else:
         st.subheader("Latest run")
-        st.caption(f"{run['id']} · {run['created_at']} · {run['mode']} · dataset {run['dataset_version']}")
+        st.caption(
+            f"{run['id']} · {run['created_at']} · {run['mode']} · dataset {run['dataset_version']}"
+        )
         cols = st.columns(4)
-        for col, key, label in zip(cols, ("passed", "failed", "not_applicable", "error"),
-                                   ("Passed", "Failed", "Not applicable", "Errors")):
+        for col, key, label in zip(
+            cols,
+            ("passed", "failed", "not_applicable", "error"),
+            ("Passed", "Failed", "Not applicable", "Errors"),
+        ):
             col.metric(label, run["summary"][key])
         st.caption("Status counts describe Recall@K. Other metrics have separate case statuses.")
         mrr = run.get("mrr_summary")
         if mrr is not None:
-            st.metric("Mean reciprocal rank", f"{mrr['score']:.3f}" if mrr["score"] is not None else "N/A",
-                      help=METRIC_HELP["mrr"])
-            st.caption(f"{mrr['scored_cases']} scored cases · {mrr['excluded_cases']} excluded cases")
+            st.metric(
+                "Mean reciprocal rank",
+                f"{mrr['score']:.3f}" if mrr["score"] is not None else "N/A",
+                help=METRIC_HELP["mrr"],
+            )
+            st.caption(
+                f"{mrr['scored_cases']} scored cases · {mrr['excluded_cases']} excluded cases"
+            )
         if run.get("mrr_recomputed"):
-            st.info("This run predates MRR. Values shown here were calculated from its saved labels and ranked IDs; the saved run file is unchanged.")
+            st.info(
+                "This run predates MRR. Values shown here were calculated from "
+                "its saved labels and ranked IDs; the saved run file is unchanged."
+            )
         map_summary = run.get("map_summary")
         if map_summary is not None:
-            st.metric("Mean average precision", f"{map_summary['score']:.3f}" if map_summary["score"] is not None else "N/A",
-                      help=METRIC_HELP["map"])
-            st.caption(f"MAP: {map_summary['scored_cases']} scored cases · {map_summary['excluded_cases']} excluded cases")
+            st.metric(
+                "Mean average precision",
+                f"{map_summary['score']:.3f}" if map_summary["score"] is not None else "N/A",
+                help=METRIC_HELP["map"],
+            )
+            st.caption(
+                (
+                    f"MAP: {map_summary['scored_cases']} scored cases · "
+                    f"{map_summary['excluded_cases']} excluded cases"
+                )
+            )
+        generation_summary = run.get("generation_summary")
+        if generation_summary:
+            st.markdown("#### Abstention error rates")
+            with st.container(horizontal=True):
+                for label, rate, count, denominator in (
+                    (
+                        "False confidence",
+                        "false_confidence_rate",
+                        "false_confidence_count",
+                        "unanswerable_scored",
+                    ),
+                    (
+                        "False abstention",
+                        "false_abstention_rate",
+                        "false_abstention_count",
+                        "answerable_scored",
+                    ),
+                ):
+                    value = generation_summary[rate]
+                    st.metric(
+                        label,
+                        f"{value:.0%}" if value is not None else "N/A",
+                        help=(
+                            f"{generation_summary[count]}/{generation_summary[denominator]} "
+                            "scored planted cases; synthetic labels are not a production estimate."
+                        ),
+                    )
         st.markdown("#### Case results")
         st.dataframe(
             [result_row(r) for r in run["results"]],
             column_config={
-                **{label: st.column_config.NumberColumn(f"{label} ⓘ", help=METRIC_HELP[key])
-                   for label, key in RESULT_METRIC_COLUMNS.items()},
-                **{label: st.column_config.TextColumn(
-                    f"{label} ⓘ", help=f"{METRIC_HELP[key]}\n\n{STATUS_HELP}")
-                   for label, key in RESULT_STATUS_COLUMNS.items()},
+                **{
+                    label: st.column_config.NumberColumn(f"{label} ⓘ", help=METRIC_HELP[key])
+                    for label, key in RESULT_METRIC_COLUMNS.items()
+                },
+                **{
+                    label: st.column_config.TextColumn(
+                        f"{label} ⓘ", help=f"{METRIC_HELP[key]}\n\n{STATUS_HELP}"
+                    )
+                    for label, key in RESULT_STATUS_COLUMNS.items()
+                },
                 "Hits": st.column_config.TextColumn(
-                    "Hits ⓘ", help="Relevant documents found in the first K results / all labeled relevant documents. "
-                    "Example: 2/3 means two of three relevant documents were retrieved in the first K positions."),
+                    "Hits ⓘ",
+                    help="Relevant documents found in the first K results / all labeled "
+                    "relevant documents. "
+                    "Example: 2/3 means two of three relevant documents were "
+                    "retrieved in the first K positions.",
+                ),
             },
-            width="stretch", hide_index=True,
+            width="stretch",
+            hide_index=True,
         )
         st.markdown("#### Trace inspector")
-        chosen = st.selectbox("Inspect case", [r["case"]["id"] for r in run["results"]], key="inspect_case")
+        chosen = st.selectbox(
+            "Inspect case", [r["case"]["id"] for r in run["results"]], key="inspect_case"
+        )
         result = next(r for r in run["results"] if r["case"]["id"] == chosen)
         c1, c2 = st.columns([1, 1.1], gap="large")
         with c1:
             st.markdown("**Input and reference**")
             st.write(result["case"]["question"])
-            st.caption(f"User: {result['case']['user_id']} · Category: {result['case']['category']}")
-            st.write("Expected relevant IDs:", ", ".join(result["case"]["relevant_ids"]) or "None labeled")
+            st.caption(
+                f"User: {result['case']['user_id']} · Category: {result['case']['category']}"
+            )
+            st.write(
+                "Expected relevant IDs:",
+                ", ".join(result["case"]["relevant_ids"]) or "None labeled",
+            )
             st.write("Expected answer:", result["case"]["expected_answer"])
+            st.write("Exact Match references:", result["case"].get("exact_match_references", ()))
             if result["case"].get("supporting_evidence"):
                 st.write("Supporting evidence:", result["case"]["supporting_evidence"])
             st.write("Graded relevance:", result["case"].get("relevance_grades", {}))
             st.write("Context relevance judgments:", result["case"].get("context_relevance", {}))
             st.write("Reference points:", result["case"].get("reference_points", ()))
+            st.write("Answerable label:", result["case"].get("answerable"))
+            if trap_context := result["case"].get("trap_context_answer"):
+                st.write("Trap context answer:", trap_context)
+                st.write("Trap prior answer:", result["case"].get("trap_prior_answer", ""))
             if result["case"]["notes"]:
                 st.caption(result["case"]["notes"])
             st.markdown("**Actual answer**")
             st.write((result["response"] or {}).get("answer") or "Unavailable")
-            st.write("Citations:", ", ".join((result["response"] or {}).get("citations", [])) or "None")
+            st.write(
+                "Citations:", ", ".join((result["response"] or {}).get("citations", [])) or "None"
+            )
             if result["error"]:
                 st.error(result["error"])
         with c2:
@@ -334,11 +712,65 @@ with tabs[0]:
                 if calc["score"] is None:
                     st.warning(calc["reason"])
                 else:
-                    st.metric(f"Recall@{calc['k']}", f"{calc['score']:.2f}", help=METRIC_HELP["recall"])
-                    st.write(f"**{calc['numerator']} hits / {calc['denominator']} relevant IDs = {calc['score']:.2f}**")
+                    st.metric(
+                        f"Recall@{calc['k']}", f"{calc['score']:.2f}", help=METRIC_HELP["recall"]
+                    )
+                    st.write(
+                        (
+                            f"**{calc['numerator']} hits / {calc['denominator']} "
+                            f"relevant IDs = {calc['score']:.2f}**"
+                        )
+                    )
                     st.write("Hits:", ", ".join(calc["hits"]) or "None")
                     st.write("Misses:", ", ".join(calc["misses"]) or "None")
-                    st.caption(f"Pass threshold: {run['threshold']:.2f} · Status: {result['status']}")
+                    st.caption(
+                        f"Pass threshold: {run['threshold']:.2f} · Status: {result['status']}"
+                    )
+            st.markdown("**Exact Match calculation**")
+            em = result.get("exact_match_calculation")
+            if em is None:
+                st.caption("Unavailable in this run.")
+            elif em["score"] is None:
+                st.warning(em["reason"])
+            else:
+                st.metric("Exact Match", f"{em['score']:.0f}", help=METRIC_HELP["exact_match"])
+                st.write("Normalized answer:", em["normalized_answer"])
+                st.write("Normalized references:", em["normalized_references"])
+                matched_reference_label = (
+                    em["matched_reference_index"]
+                    if em["matched_reference_index"] is not None
+                    else "none"
+                )
+                st.caption(
+                    (
+                        f"Matched reference index: {matched_reference_label} "
+                        f"· Normalization v{em['normalization_version']} "
+                        f"· Status: {result.get('exact_match_status', 'unknown')}"
+                    )
+                )
+                if em["score"] == 0:
+                    st.info(
+                        "A mismatch is a string comparison, not proof that the answer is "
+                        "false or unsupported."
+                    )
+            st.markdown("**Token F1 calculation**")
+            f1 = result.get("token_f1_calculation")
+            if f1 is None:
+                st.caption("Unavailable in this run.")
+            elif f1["score"] is None:
+                st.warning(f1["reason"])
+            else:
+                st.metric("Token F1", f"{f1['score']:.3f}", help=METRIC_HELP["token_f1"])
+                st.write("Answer tokens:", f1["answer_tokens"])
+                st.write("Reference tokens:", f1["reference_tokens"])
+                st.caption(
+                    (
+                        f"Best reference index: {f1['matched_reference_index']} "
+                        f"· Overlap: {f1['overlap']} "
+                        f"· Precision: {f1['precision']:.3f} · Recall: {f1['recall']:.3f} "
+                        f"· Status: {result.get('token_f1_status', 'unknown')}"
+                    )
+                )
             st.markdown("**Precision@K calculation**")
             precision = result.get("precision_calculation")
             if precision is None:
@@ -346,12 +778,29 @@ with tabs[0]:
             elif precision["score"] is None:
                 st.warning(precision["reason"])
             else:
-                st.metric(f"Precision@{precision['k']}", f"{precision['score']:.2f}",
-                          help=METRIC_HELP["precision"])
-                st.write(f"**{precision['numerator']} relevant hits / {precision['denominator']} ranks = {precision['score']:.2f}**")
-                st.write("Relevant ranks:", ", ".join(map(str, precision["relevant_ranks"])) or "None")
-                st.write("Duplicate ranks:", ", ".join(map(str, precision["duplicate_ranks"])) or "None")
-                st.caption(f"Pass threshold: {run['threshold']:.2f} · Precision status: {result.get('precision_status', 'unknown')}")
+                st.metric(
+                    f"Precision@{precision['k']}",
+                    f"{precision['score']:.2f}",
+                    help=METRIC_HELP["precision"],
+                )
+                st.write(
+                    (
+                        f"**{precision['numerator']} relevant hits / {precision['denominator']} "
+                        f"ranks = {precision['score']:.2f}**"
+                    )
+                )
+                st.write(
+                    "Relevant ranks:", ", ".join(map(str, precision["relevant_ranks"])) or "None"
+                )
+                st.write(
+                    "Duplicate ranks:", ", ".join(map(str, precision["duplicate_ranks"])) or "None"
+                )
+                st.caption(
+                    (
+                        f"Pass threshold: {run['threshold']:.2f} · Precision status: "
+                        f"{result.get('precision_status', 'unknown')}"
+                    )
+                )
             st.markdown("**Reciprocal rank calculation**")
             rr = result.get("reciprocal_rank_calculation")
             if rr is None:
@@ -359,8 +808,9 @@ with tabs[0]:
             elif rr["score"] is None:
                 st.warning(rr["reason"])
             else:
-                st.metric("Reciprocal rank", f"{rr['score']:.3f}",
-                          help=METRIC_HELP["reciprocal_rank"])
+                st.metric(
+                    "Reciprocal rank", f"{rr['score']:.3f}", help=METRIC_HELP["reciprocal_rank"]
+                )
                 st.write("First relevant ID:", rr["first_relevant_id"] or "None")
                 st.write("First relevant rank:", rr["first_relevant_rank"] or "None")
                 st.caption(f"Status: {result.get('reciprocal_rank_status', 'unknown')}")
@@ -375,12 +825,34 @@ with tabs[0]:
                 st.write(f"DCG {ndcg['dcg']:.4f} / ideal DCG {ndcg['ideal_dcg']:.4f}")
                 st.write("Ranked grades:", ndcg["ranked_grades"])
                 st.write("Ideal grades:", ndcg["ideal_grades"])
-                st.write("Discounted gains:", [round(value, 4) for value in ndcg["discounted_gains"]])
-                st.caption(f"Duplicate ranks: {ndcg['duplicate_ranks'] or 'None'} · Status: {result.get('ndcg_status', 'unknown')}")
+                st.write(
+                    "Discounted gains:", [round(value, 4) for value in ndcg["discounted_gains"]]
+                )
+                st.caption(
+                    (
+                        f"Duplicate ranks: {ndcg['duplicate_ranks'] or 'None'} "
+                        f"· Status: {result.get('ndcg_status', 'unknown')}"
+                    )
+                )
             for title, key, status_key, help_key in (
-                ("Average precision", "average_precision_calculation", "average_precision_status", "average_precision"),
-                ("Context precision", "context_precision_calculation", "context_precision_status", "context_precision"),
-                ("Context recall", "context_recall_calculation", "context_recall_status", "context_recall"),
+                (
+                    "Average precision",
+                    "average_precision_calculation",
+                    "average_precision_status",
+                    "average_precision",
+                ),
+                (
+                    "Context precision",
+                    "context_precision_calculation",
+                    "context_precision_status",
+                    "context_precision",
+                ),
+                (
+                    "Context recall",
+                    "context_recall_calculation",
+                    "context_recall_status",
+                    "context_recall",
+                ),
             ):
                 st.markdown(f"**{title} calculation**")
                 detail = result.get(key)
@@ -397,315 +869,117 @@ with tabs[0]:
             retrieved = (result["response"] or {}).get("retrieved", [])
             if retrieved:
                 for rank, hit in enumerate(retrieved, 1):
-                    with st.expander(f"#{rank} · {hit['id']} · {hit['title']}", expanded=rank <= min(int(k), 2)):
+                    with st.expander(
+                        f"#{rank} · {hit['id']} · {hit['title']}", expanded=rank <= min(int(k), 2)
+                    ):
                         st.write(hit["text"] or "No text in trace")
                         if hit.get("source_url"):
                             st.caption(hit["source_url"])
             else:
                 st.caption("No ranked retrieval available.")
         with st.expander("Complete case trace and provenance"):
-            st.json({"run_id": run["id"], "dataset_version": run["dataset_version"],
-                     "run_config": run["config"], "k": run["k"], "threshold": run["threshold"],
-                     "case_result": result})
+            st.json(
+                {
+                    "run_id": run["id"],
+                    "dataset_version": run["dataset_version"],
+                    "run_config": run["config"],
+                    "k": run["k"],
+                    "threshold": run["threshold"],
+                    "case_result": result,
+                }
+            )
+        st.markdown("**Generation judge trace**")
+        judgments = result.get("generation_judgments", {})
+        if judgments:
+            st.caption(
+                "Judge scores are provisional. Compare item verdicts and evidence "
+                "with human labels before using them for decisions."
+            )
+            st.dataframe(
+                [
+                    {
+                        "Metric": name.replace("_", " "),
+                        "Score": detail.get("score"),
+                        "Status": detail.get("status"),
+                        "Review": detail.get("review_status", "not reviewed"),
+                    }
+                    for name, detail in judgments.items()
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+            for name, detail in judgments.items():
+                with st.expander(f"{name.replace('_', ' ').title()} · {detail.get('status')}"):
+                    st.markdown(RUBRICS[name])
+                    st.json(detail)
+            reviewable = [
+                name for name, detail in judgments.items() if detail.get("status") == "scored"
+            ]
+            if reviewable:
+                with st.form(f"review-{run['id']}-{chosen}"):
+                    st.markdown("**Human review gate**")
+                    review_metric = st.selectbox("Metric to review", reviewable)
+                    reviewer = st.text_input("Reviewer ID")
+                    decision = st.selectbox("Decision", ["accept", "reject"])
+                    review_note = st.text_area("Evidence and reason for decision")
+                    submitted = st.form_submit_button("Record review")
+                if submitted:
+                    try:
+                        reviewed = review_judgment(
+                            judgments[review_metric],
+                            reviewer=reviewer,
+                            decision=decision,
+                            note=review_note,
+                        )
+                        judgments[review_metric] = reviewed
+                        st.session_state.current_run = run
+                        store.save(
+                            persisted_copy(run, include_content=run["mode"] == "Offline fixtures")
+                        )
+                        st.success("Human review recorded for this run.")
+                    except ValueError as exc:
+                        st.error(str(exc))
+        else:
+            st.caption(
+                "No judge ran for this case. Configure an approved judge gateway "
+                "or use synthetic reviewed labels."
+            )
         trace = result.get("trace")
         if trace:
             st.markdown("**Execution events**")
             st.dataframe(trace["events"], hide_index=True, width="stretch")
-            st.caption(f"Ranked retrieval: {trace['ranked_retrieval_status']} · Generation context: {trace['generation_context_status']} · Started: {trace['started_at'] or 'unavailable'} · Finished: {trace['finished_at'] or 'unavailable'}")
-        st.download_button("Download full run JSON", json.dumps(original_run, indent=2), file_name=f"{run['id']}.json", mime="application/json")
-        st.caption("A synthetic run checks evaluator behavior against fixtures. It does not establish real bot quality or label validity.")
+            st.caption(
+                (
+                    f"Ranked retrieval: {trace['ranked_retrieval_status']} "
+                    f"· Generation context: {trace['generation_context_status']} "
+                    f"· Started: {trace['started_at'] or 'unavailable'} "
+                    f"· Finished: {trace['finished_at'] or 'unavailable'}"
+                )
+            )
+        st.download_button(
+            "Download full run JSON",
+            json.dumps(original_run, indent=2),
+            file_name=f"{run['id']}.json",
+            mime="application/json",
+        )
+        st.caption(
+            "A synthetic run checks evaluator behavior against fixtures. It "
+            "does not establish real bot quality or label validity."
+        )
 
 with tabs[1]:
-    st.subheader("Test cases and fixture responses")
-    st.caption("Edit a case and its offline response, then run it from the sidebar. Changes live in this dashboard session and are versioned by dataset hash in each run.")
-    with st.expander("Share or restore a synthetic case pack"):
-        st.caption("Export cases and predefined responses as JSON. Import validates references against the six-page synthetic corpus. Connection tokens are never included.")
-        pack = export_case_pack(st.session_state.cases, st.session_state.responses)
-        st.download_button("Download case pack", json.dumps(pack, indent=2),
-                           file_name="synthetic-case-pack.json", mime="application/json")
-        uploaded = st.file_uploader("Import case pack JSON", type="json")
-        if st.button("Import case pack", disabled=uploaded is None) and uploaded is not None:
-            try:
-                imported_cases, imported_responses = import_case_pack(
-                    cast(dict[str, object], json.load(uploaded)), set(DOCUMENTS))
-                st.session_state.cases = imported_cases
-                st.session_state.responses = imported_responses
-                st.success(f"Imported {len(imported_cases)} cases. The sidebar selection has been refreshed.")
-                st.rerun()
-            except (ValueError, json.JSONDecodeError) as exc:
-                st.error(str(exc))
-    case_id = st.selectbox("Choose a case to edit", [c.id for c in st.session_state.cases], key="edit_case")
-    case = next(c for c in st.session_state.cases if c.id == case_id)
-    response = st.session_state.responses.get(case_id, RagResponse("", ()))
-    with st.form(f"edit-{case_id}"):
-        a, b = st.columns(2, gap="large")
-        with a:
-            name = st.text_input("Case name", case.name)
-            question = st.text_area("Question", case.question)
-            relevant = st.text_input("Relevant IDs, comma separated", ", ".join(case.relevant_ids))
-            grade_text = st.text_input("Graded relevance (JSON ID to nonnegative integer)",
-                                       json.dumps(case.relevance_grades))
-            context_text = st.text_area("Context relevance judgments (JSON ID to true/false)",
-                                        json.dumps(case.context_relevance))
-            points_text = st.text_area("Reference points (one per line)",
-                                       "\n".join(case.reference_points))
-            support_text = st.text_area("Point support (JSON point to context ID list)",
-                                        json.dumps(case.point_support))
-            expected = st.text_area("Expected answer / behavior", case.expected_answer)
-            category = st.text_input("Category", case.category)
-            user_id = st.text_input("User context ID", case.user_id)
-            notes = st.text_area("Case notes", case.notes)
-            supporting_evidence = st.text_area("Supporting evidence", case.supporting_evidence)
-        with b:
-            actual_answer = st.text_area("Offline actual answer", response.answer)
-            retrieved_ids = st.text_area("Ranked retrieved IDs, comma separated", ", ".join(r.id for r in response.retrieved),
-                                         help="Order matters. Duplicate IDs are allowed to exercise duplicate behavior.")
-            citations = st.text_input("Offline citations, comma separated", ", ".join(response.citations))
-            st.caption("Known synthetic IDs: " + ", ".join(DOCUMENTS))
-        save_case = st.form_submit_button("Save case and fixture", type="primary")
-    if save_case:
-        ids = tuple(x.strip() for x in relevant.split(",") if x.strip())
-        ranked = tuple(x.strip() for x in retrieved_ids.split(",") if x.strip())
-        try:
-            grades = json.loads(grade_text)
-            judgments = json.loads(context_text)
-            support_raw = json.loads(support_text)
-            if not isinstance(support_raw, dict) or any(not isinstance(items, list) for items in support_raw.values()):
-                raise ValueError("Point support must be a JSON object of ID lists")
-            support = {point: tuple(items) for point, items in support_raw.items()}
-            points = tuple(line.strip() for line in points_text.splitlines() if line.strip())
-            updated = TestCase(case.id, name, question, ids, expected, category, user_id, notes,
-                               supporting_evidence, grades, judgments, points, support)
-            updated.validate()
-            if any(i not in DOCUMENTS for i in ids + ranked) or any(i not in DOCUMENTS for i in grades) or any(
-                i not in DOCUMENTS for i in judgments
-            ) or any(i not in DOCUMENTS for items in support.values() for i in items):
-                raise ValueError("IDs must refer to the synthetic corpus")
-            updated_response = RagResponse(actual_answer,
-                tuple(RetrievedItem(i, DOCUMENTS[i]["title"], DOCUMENTS[i]["text"]) for i in ranked),
-                tuple(x.strip() for x in citations.split(",") if x.strip()))
-            st.session_state.cases = [updated if c.id == case.id else c for c in st.session_state.cases]
-            st.session_state.responses[case.id] = updated_response
-            st.success("Saved in this session. Run the case to see the new result.")
-        except (ValueError, json.JSONDecodeError) as exc:
-            st.error(str(exc))
-    with st.expander("Add a new synthetic case"):
-        with st.form("add-case"):
-            new_id = st.text_input("New case ID", placeholder="CASE-005")
-            new_name = st.text_input("Name")
-            new_question = st.text_area("Question")
-            new_relevant = st.text_input("Relevant IDs, comma separated")
-            new_grades = st.text_input("Graded relevance (JSON ID to nonnegative integer)", value="{}")
-            new_context = st.text_area("Context relevance judgments (JSON ID to true/false)", value="{}")
-            new_points = st.text_area("Reference points (one per line)")
-            new_support = st.text_area("Point support (JSON point to context ID list)", value="{}")
-            new_expected = st.text_input("Expected answer / behavior")
-            new_evidence = st.text_area("Supporting evidence for new case")
-            new_category = st.text_input("Category", value="custom")
-            new_actual = st.text_area("Offline actual answer")
-            new_ranked = st.text_input("Ranked retrieved IDs, comma separated")
-            add_case = st.form_submit_button("Add case")
-        if add_case:
-            ids = tuple(x.strip() for x in new_relevant.split(",") if x.strip())
-            ranked = tuple(x.strip() for x in new_ranked.split(",") if x.strip())
-            try:
-                grades = json.loads(new_grades)
-                judgments = json.loads(new_context)
-                support_raw = json.loads(new_support)
-                if not isinstance(support_raw, dict) or any(not isinstance(items, list) for items in support_raw.values()):
-                    raise ValueError("Point support must be a JSON object of ID lists")
-                support = {point: tuple(items) for point, items in support_raw.items()}
-                points = tuple(line.strip() for line in new_points.splitlines() if line.strip())
-                if new_id in [c.id for c in st.session_state.cases]:
-                    raise ValueError("Case ID already exists")
-                new_case = TestCase(new_id, new_name, new_question, ids, new_expected,
-                                    new_category, supporting_evidence=new_evidence,
-                                    relevance_grades=grades, context_relevance=judgments,
-                                    reference_points=points, point_support=support)
-                new_case.validate()
-                if any(i not in DOCUMENTS for i in ids + ranked) or any(i not in DOCUMENTS for i in grades) or any(
-                    i not in DOCUMENTS for i in judgments
-                ) or any(i not in DOCUMENTS for items in support.values() for i in items):
-                    raise ValueError("IDs must refer to the synthetic corpus")
-                st.session_state.cases.append(new_case)
-                st.session_state.responses[new_id] = RagResponse(new_actual, tuple(
-                    RetrievedItem(i, DOCUMENTS[i]["title"], DOCUMENTS[i]["text"]) for i in ranked))
-                st.success("Case added. Select it in the sidebar to run it.")
-            except (ValueError, json.JSONDecodeError) as exc:
-                st.error(str(exc))
-    with st.expander("Synthetic document catalog"):
-        st.dataframe([{"ID": i, **d} for i, d in DOCUMENTS.items()], hide_index=True, width="stretch")
+    render_case_editor()
 
 with tabs[3]:
-    st.subheader("Run history")
-    history = store.list()
-    if not history:
-        st.info("No saved runs yet.")
-    else:
-        st.dataframe([{"Run": r["id"], "When (UTC)": r["created_at"], "Source": r["mode"],
-                       "Dataset": r["dataset_version"], "Cases": len(r["results"]),
-                       **r["summary"]} for r in history], hide_index=True, width="stretch")
-        history_id = st.selectbox("Open saved run", [r["id"] for r in history])
-        saved = next(r for r in history if r["id"] == history_id)
-        if saved.get("content_redacted"):
-            st.info("Sensitive content was redacted from this saved live run. The current session may still hold the full trace.")
-        if st.button("Show this run in Overview"):
-            st.session_state.current_run = saved
-            st.info("Open the Overview tab to inspect the selected run.")
-        st.download_button("Download saved run", json.dumps(saved, indent=2), file_name=f"{history_id}.json", mime="application/json")
+    render_history(store)
 
 with tabs[4]:
-    st.subheader("Compare saved runs")
-    history = store.list()
-    if len(history) < 2:
-        st.info("Run the cases at least twice to compare a baseline and a candidate.")
-    else:
-        left, right = st.columns(2)
-        with left:
-            baseline_id = st.selectbox("Baseline run", [r["id"] for r in history], index=1)
-        with right:
-            candidate_id = st.selectbox("Candidate run", [r["id"] for r in history], index=0)
-        baseline = with_recomputed_mrr(next(r for r in history if r["id"] == baseline_id))
-        candidate = with_recomputed_mrr(next(r for r in history if r["id"] == candidate_id))
-        if baseline_id == candidate_id:
-            st.warning("Choose two different runs to see changes.")
-        if baseline["dataset_version"] != candidate["dataset_version"]:
-            st.warning("Dataset versions differ. Score changes may reflect edited cases or labels rather than bot behavior.")
-        if baseline["k"] != candidate["k"]:
-            st.warning("K differs between runs. Retrieval scores are not directly comparable.")
-        base_results = {r["case"]["id"]: r for r in baseline["results"]}
-        candidate_results = {r["case"]["id"]: r for r in candidate["results"]}
-        rows: list[dict[str, str | float | None]] = []
-        for case_id in sorted(set(base_results) | set(candidate_results)):
-            before = base_results.get(case_id)
-            after = candidate_results.get(case_id)
-            before_calc = before["calculation"] if before is not None else None
-            after_calc = after["calculation"] if after is not None else None
-            before_score = before_calc["score"] if before_calc is not None else None
-            after_score = after_calc["score"] if after_calc is not None else None
-            before_precision = before.get("precision_calculation") if before is not None else None
-            after_precision = after.get("precision_calculation") if after is not None else None
-            before_precision_score = before_precision["score"] if before_precision is not None else None
-            after_precision_score = after_precision["score"] if after_precision is not None else None
-            before_rr = before.get("reciprocal_rank_calculation") if before is not None else None
-            after_rr = after.get("reciprocal_rank_calculation") if after is not None else None
-            before_rr_score = before_rr["score"] if before_rr is not None else None
-            after_rr_score = after_rr["score"] if after_rr is not None else None
-            before_ndcg = before.get("ndcg_calculation") if before is not None else None
-            after_ndcg = after.get("ndcg_calculation") if after is not None else None
-            before_ndcg_score = before_ndcg["score"] if before_ndcg is not None else None
-            after_ndcg_score = after_ndcg["score"] if after_ndcg is not None else None
-            row = {"Case": case_id, "Baseline status": before["status"] if before else "not run",
-                         "Candidate status": after["status"] if after else "not run",
-                         "Baseline recall": before_score, "Candidate recall": after_score,
-                         "Score change": round(after_score - before_score, 4)
-                         if before_score is not None and after_score is not None else None,
-                         "Baseline precision": before_precision_score,
-                         "Candidate precision": after_precision_score,
-                         "Precision change": round(after_precision_score - before_precision_score, 4)
-                         if before_precision_score is not None and after_precision_score is not None else None,
-                         "Baseline RR": before_rr_score, "Candidate RR": after_rr_score,
-                         "RR change": round(after_rr_score - before_rr_score, 4)
-                         if before_rr_score is not None and after_rr_score is not None else None,
-                         "Baseline NDCG": before_ndcg_score, "Candidate NDCG": after_ndcg_score,
-                         "NDCG change": round(after_ndcg_score - before_ndcg_score, 4)
-                         if before_ndcg_score is not None and after_ndcg_score is not None else None}
-            for label, field in (("AP", "average_precision_calculation"),
-                                 ("Context precision", "context_precision_calculation"),
-                                 ("Context recall", "context_recall_calculation")):
-                before_metric = before.get(field) if before else None
-                after_metric = after.get(field) if after else None
-                before_value = before_metric["score"] if before_metric else None
-                after_value = after_metric["score"] if after_metric else None
-                row[f"Baseline {label}"] = before_value
-                row[f"Candidate {label}"] = after_value
-                row[f"{label} change"] = round(after_value - before_value, 4) if (
-                    before_value is not None and after_value is not None) else None
-            rows.append(row)
-        st.dataframe(rows, hide_index=True, width="stretch")
-        st.caption("A status change can also result from a threshold change. Inspect both run configurations and case traces before drawing conclusions.")
+    render_comparison(store)
 
 with tabs[5]:
-    st.subheader("What these results mean")
-    st.markdown("""
-**1 · Evaluator correctness.** Unit tests check retrieval and context metrics against known labels, including duplicates, empty retrieval, and unlabeled cases.
+    render_interpretation()
 
-**2 · Bot performance.** A live run can measure the bot only when its API and ranked trace are available. Offline fixture scores are development examples, not evidence of production quality.
+with tabs[6]:
+    render_guide()
 
-**3 · Methodology validity.** Relevant IDs, permission expectations, and future judge outputs require independent human validation. A precise score can still be misleading when labels are wrong.
-
-**Recall@K definition in this version:** unique labeled relevant IDs present in the first K ranked results, divided by all unique labeled relevant IDs. Duplicates occupy ranks but do not increase the numerator. Cases with no labeled relevant IDs are not applicable. The pass threshold is configurable per run.
-
-**Precision@K definition in this version:** unique labeled relevant IDs in the first K ranked positions, divided by K. Duplicate hits and unfilled positions earn no hit. With no relevance labels the score is not applicable. Precision measures how clean the top K is; recall measures how much of all relevant evidence it contains.
-
-**MRR definition in this version:** for each labeled case, reciprocal rank is 1 divided by the first relevant rank in the full retrieved list, or 0 if no relevant ID appears. MRR averages these values across scored cases. Unlabeled cases and execution errors are excluded; if none can be scored, MRR is unavailable. MRR does not use K.
-
-**NDCG@K definition in this version:** use explicit nonnegative integer relevance grades. At rank r, gain is `(2^grade - 1) / log₂(r + 1)`. Sum these gains for the first K ranks to get DCG. Sort labeled grades descending and apply the same discount to get ideal DCG. NDCG is DCG divided by ideal DCG. Duplicate IDs earn zero after their first appearance. Cases without a positive grade are not applicable. Unlabeled retrieved IDs count as grade zero.
-
-**MAP:** average precision sums prefix precision at each first relevant hit and divides by the number of all labeled relevant IDs. MAP averages those case scores over labeled cases with valid responses. A missing relevant ID contributes zero.
-
-**Context precision:** uses separately reviewed true/false judgments for each retrieved context item. It averages prefix precision at ranks judged useful. The denominator is the number of useful retrieved contexts, unlike classical Precision@K's fixed K. Unjudged retrieved IDs make this metric unavailable.
-
-**Context recall:** counts reference answer points supported by at least one retrieved context item, divided by all labeled reference points. It uses explicit point-to-context support annotations, not string matching or a live LLM judge. Both context metrics measure retrieved context; the exact context passed to generation remains unavailable.
-
-**Retrieval strategies:** section routing, vector/keyword, hybrid, and RRF/multi-query comparisons are unavailable until the bot exposes its architecture, per-strategy ranked traces, and comparable run configuration. The current adapter records one final ranked list only.
-
-**Current limits:** Permission and answer quality scenarios are present as fixtures but are not scored by dedicated metrics yet. Confluence connection testing does not import pages. Live bot responses currently use the fixture contract until a real API contract is available. External LLM judges are not connected.
-""")
-
-if quiz_enabled:
-    with tabs[6]:
-        st.subheader("Check understanding")
-        st.caption("Test what has been built so far. Your answers and result stay in this dashboard session.")
-        quiz_folder = Path(__file__).resolve().parent / "study_quiz"
-        try:
-            questions = load_quiz(quiz_folder)
-        except (OSError, ValueError) as exc:
-            st.info(f"Quiz unavailable: {exc}. Add QUESTIONS.md and ANSWER_KEY.md to study_quiz/.")
-        else:
-            if st.session_state.get("quiz_result") is None:
-                with st.form("understanding_quiz"):
-                    section = None
-                    for question in questions:
-                        if question.section != section:
-                            section = question.section
-                            st.markdown(f"#### {section}")
-                        st.markdown(f"**{question.number}. {question.prompt}**")
-                        st.radio(
-                            f"Answer for question {question.number}",
-                            list(question.options),
-                            index=None,
-                            format_func=lambda choice, options=question.options: f"{choice}. {options[choice]}",
-                            key=f"quiz_answer_{question.number}",
-                            label_visibility="collapsed",
-                        )
-                    submitted = st.form_submit_button("Submit answers", type="primary")
-                if submitted:
-                    answers = {q.number: st.session_state.get(f"quiz_answer_{q.number}") for q in questions}
-                    unanswered = [number for number, answer in answers.items() if answer is None]
-                    if unanswered:
-                        st.warning(f"Answer all {len(questions)} questions before submitting. Unanswered: {', '.join(map(str, unanswered))}.")
-                    else:
-                        st.session_state.quiz_result = answers
-                        st.rerun()
-            else:
-                answers = st.session_state.quiz_result
-                correct = sum(answers.get(q.number) == q.answer for q in questions)
-                st.metric("Your score", f"{correct}/{len(questions)}", f"{correct / len(questions):.0%}")
-                st.progress(correct / len(questions))
-                if correct == len(questions):
-                    st.success("All answers correct.")
-                else:
-                    st.info(f"{len(questions) - correct} question(s) to review. Your answers and the correct answers are below.")
-                for question in questions:
-                    chosen = answers.get(question.number)
-                    is_correct = chosen == question.answer
-                    with st.expander(f"{'✅' if is_correct else '❌'} {question.number}. {question.prompt}", expanded=not is_correct):
-                        st.write(f"Your answer: **{chosen}. {question.options.get(chosen, 'No answer')}**")
-                        st.write(f"Correct answer: **{question.answer}. {question.options[question.answer]}**")
-                        st.write(question.explanation)
-                if st.button("Retake quiz"):
-                    st.session_state.quiz_result = None
-                    for question in questions:
-                        st.session_state.pop(f"quiz_answer_{question.number}", None)
-                    st.rerun()
+render_quiz(quiz_enabled, tabs)
