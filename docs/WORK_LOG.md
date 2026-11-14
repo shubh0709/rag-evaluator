@@ -98,6 +98,18 @@ Draft an HLD that labels proposed decisions and alternatives. Obtain HLD approva
 
 **Verification:** 15 pytest tests passed and Python compilation passed. Browser smoke checks confirmed the case-pack panel, the empty comparison state, and a populated comparison after a second manual run.
 
+## 2026-11-14 — Phase 1 and 2 completion pass; Precision@K
+
+**Authorization:** The user requested completion of remaining Phase 1 and 2 work and Precision@K only from Phase 3.
+
+**Implemented:** Strengthened case, response, retrieved-item, and citation validation; added optional document/chunk provenance IDs; documented version-2 run, request, response, metric, and trace contracts in `CONTRACTS.md`; captured per-case request/response/metric events and available execution timestamps; displayed trace availability explicitly; added Precision@K formula, edge-case tests, case-level scores and statuses, calculation breakdown, and run comparison columns. The saved run summary still represents Recall@K so older run interpretation remains stable.
+
+**Precision decision:** Unique relevant IDs earn one hit in the first K positions. Duplicate hits and unfilled positions consume K without earning a hit. No-label cases are not applicable. The same selected threshold is reported independently for Recall@K and Precision@K.
+
+**Evidence:** Synthetic fixture run, unit tests, JSON round-trip, Python compilation, and Streamlit AppTest smoke check. These establish evaluator behavior on synthetic data, not real bot performance. The bot API, exact context supplied to generation, real permission oracle, and independently reviewed labels remain unavailable. The implementation plan requested in Phase 0 Task 0.4 is still absent and should be prepared before later phase work.
+
+**Subsequent work:** MRR, NDCG@K, MAP, context precision, and context recall were added with synthetic labels and calculation tests. The bot's retrieval architecture and per-stage traces are still needed before strategy comparisons can be evaluated.
+
 ## Entry template
 
 ```text

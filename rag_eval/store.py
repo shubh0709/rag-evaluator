@@ -11,6 +11,15 @@ class RunStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def save(self, run: Run) -> Path:
+        if run.get("schema_version") != 2:
+            raise ValueError("Expected run schema version 2")
+        run_id = run.get("id")
+        if not isinstance(run_id, str) or not run_id.startswith("run-") or any(
+            char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" for char in run_id
+        ):
+            raise ValueError("Invalid run ID")
+        if not isinstance(run.get("results"), list) or not isinstance(run.get("summary"), dict):
+            raise ValueError("Run results and summary are required")
         target = self.root / f"{run['id']}.json"
         temporary = target.with_suffix(".tmp")
         temporary.write_text(json.dumps(run, indent=2), encoding="utf-8")

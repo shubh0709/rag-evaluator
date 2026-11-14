@@ -16,3 +16,10 @@ def test_case_pack_rejects_unknown_reference():
     cast(list[dict[str, object]], pack["cases"])[0]["relevant_ids"] = ["MISSING"]
     with pytest.raises(ValueError, match="Unknown relevant ID"):
         import_case_pack(pack, set(DOCUMENTS))
+
+
+def test_case_pack_rejects_invalid_grade():
+    pack = export_case_pack(CASES, RESPONSES)
+    cast(list[dict[str, object]], pack["cases"])[0]["relevance_grades"] = {"DOC-101": -1}
+    with pytest.raises(ValueError, match="Relevance grades"):
+        import_case_pack(pack, set(DOCUMENTS))

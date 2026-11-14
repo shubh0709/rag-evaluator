@@ -31,6 +31,9 @@ def test_synthetic_references_are_consistent():
     for case in CASES:
         case.validate()
         assert set(case.relevant_ids).issubset(DOCUMENTS)
+        if case.relevant_ids:
+            assert case.supporting_evidence
+            assert all(doc_id in case.supporting_evidence for doc_id in case.relevant_ids)
     for response in RESPONSES.values():
         assert {item.id for item in response.retrieved}.issubset(DOCUMENTS)
 
