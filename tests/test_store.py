@@ -1,3 +1,5 @@
+"""Provide test store utilities and tests."""
+
 from pathlib import Path
 
 import pytest
@@ -7,10 +9,18 @@ from rag_eval.store import RunStore
 
 
 def test_saved_run_preserves_inputs_metrics_and_trace(tmp_path: Path) -> None:
+    """Verify saved run preserves inputs metrics and trace."""
     case = EvalCase("A", "Example", "Question?", ("DOC-A",), "Answer", "test")
     response = RagResponse("Answer", (RetrievedItem("DOC-A", document_id="DOC-A"),), ("DOC-A",))
-    run = make_run([case], {"A": response}, mode="offline", k=1, threshold=1.0,
-                   config={"source": "fixture"}, execution_times={"A": ("start", "finish")})
+    run = make_run(
+        [case],
+        {"A": response},
+        mode="offline",
+        k=1,
+        threshold=1.0,
+        config={"source": "fixture"},
+        execution_times={"A": ("start", "finish")},
+    )
     store = RunStore(tmp_path)
     path = store.save(run)
     saved = next(item for item in store.list() if item["id"] == run["id"])
@@ -26,9 +36,22 @@ def test_saved_run_preserves_inputs_metrics_and_trace(tmp_path: Path) -> None:
 
 
 def test_store_rejects_invalid_run_id(tmp_path: Path) -> None:
+    """Verify store rejects invalid run id."""
     case = EvalCase("A", "Example", "Question?", ("DOC-A",), "Answer", "test")
-    run = make_run([case], {"A": RagResponse("Answer", ())}, mode="offline", k=1,
-                   threshold=1.0, config={})
+    run = make_run(
+        [case], {"A": RagResponse("Answer", ())}, mode="offline", k=1, threshold=1.0, config={}
+    )
     run["id"] = "../../outside"
     with pytest.raises(ValueError, match="Invalid run ID"):
+        RunStore(tmp_path).save(run)
+
+
+def test_store_rejects_invalid_summary_shape(tmp_path: Path) -> None:
+    """Verify store rejects invalid summary shape."""
+    case = EvalCase("A", "Example", "Question?", (), "Answer", "test")
+    run = make_run(
+        [case], {"A": RagResponse("Answer", ())}, mode="offline", k=1, threshold=1.0, config={}
+    )
+    run["summary"] = []  # type: ignore[typeddict-item]
+    with pytest.raises(ValueError, match="summary"):
         RunStore(tmp_path).save(run)
