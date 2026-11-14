@@ -10,11 +10,14 @@ import sys
 import threading
 import webbrowser
 
+from streamlit.web import cli
+
 from .server import start_server
 from .trace import TraceStore
 
 
 def main() -> None:
+    """Main."""
     parser = argparse.ArgumentParser(description="Run an app with the live debugger")
     parser.add_argument("mode", choices=("streamlit", "python"))
     parser.add_argument("entrypoint", type=Path)
@@ -40,8 +43,6 @@ def main() -> None:
     store.install()
     try:
         if args.mode == "streamlit":
-            from streamlit.web import cli
-
             sys.argv = ["streamlit", "run", str(entrypoint), *app_args]
             cli.main()
         else:
